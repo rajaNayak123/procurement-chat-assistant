@@ -114,9 +114,13 @@ export async function processBatch(
     runId = run.id;
 
     // Lookup mapping for processed lines
+    const lineToReqByIndex = new Map<number, { req: (typeof result.requirements)[0]; line: any }>();
     const lineToReqMap = new Map<string, { req: (typeof result.requirements)[0]; line: any }>();
     for (const req of result.requirements) {
       for (const line of req.lines) {
+        if (line.input_index !== undefined) {
+          lineToReqByIndex.set(line.input_index, { req, line });
+        }
         lineToReqMap.set(`${line.pr_no}:${line.pr_line}`, { req, line });
       }
     }
@@ -135,11 +139,14 @@ export async function processBatch(
           ? new Date(rawCreatedAt)
           : new Date();
 
-      const matched = lineToReqMap.get(`${prNo}:${prLine}`);
       const outputRow = result.outputRows[index];
+      const matched =
+        lineToReqByIndex.get(index) ??
+        (outputRow?.route !== 'NOT_PROCESSED' ? lineToReqMap.get(`${prNo}:${prLine}`) : undefined);
+      const isNotProcessed = outputRow?.route === 'NOT_PROCESSED' || !matched;
       const lineDbId = `${batchId}_line_${index}`;
 
-      if (matched) {
+      if (!isNotProcessed && matched) {
         const scopedReqId = `${run.id}_${matched.req.group_id}`;
         await prisma.pRLine.upsert({
           where: { id: lineDbId },
