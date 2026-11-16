@@ -174,3 +174,31 @@ export function evaluatePredicate(
 
   return { matched: false };
 }
+
+export interface FailingCondition {
+  field: string;
+  actual: any;
+  op: ComparisonOperator;
+  expected: any;
+}
+
+export function extractFailingConditions(trace: PredicateTrace): FailingCondition[] {
+  const failures: FailingCondition[] = [];
+  function walk(t: PredicateTrace) {
+    if (t.leaf && !t.leaf.passed) {
+      failures.push({
+        field: t.leaf.field,
+        actual: t.leaf.actual,
+        op: t.leaf.op,
+        expected: t.leaf.expected,
+      });
+    }
+    if (t.children) {
+      for (const child of t.children) {
+        walk(child);
+      }
+    }
+  }
+  walk(trace);
+  return failures;
+}
