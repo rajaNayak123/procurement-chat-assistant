@@ -16,6 +16,7 @@ import { computePreferredSuppliers } from './ranking.js';
 import { evaluateRequirementRules } from './rules.js';
 import { consolidatePOs } from './consolidation.js';
 import { assertNoBlockedOrInactiveSuppliers } from './invariants.js';
+import { hasBoughtFromActiveSupplier, getPOsInWindow } from './history.js';
 import { DEFAULT_POLICY_V5, EvaluationContext, PolicyDocument } from '@cantill/policy';
 import { getCalendarDaysDiff } from './utils/dates.js';
 
@@ -61,12 +62,6 @@ export function runDecisionEngine(
     context.plants,
     itemMatcher
   );
-
-  // Map to preserve input order
-  const notProcessedMap = new Map<string, NotProcessedRow>();
-  for (const np of notProcessed) {
-    notProcessedMap.set(`${np.pr_no}:${np.pr_line}`, np);
-  }
 
   // 2. Clubbing: use the version in force at each line's date
   let requirements = clubPRLines(
@@ -149,7 +144,20 @@ export function runDecisionEngine(
       .filter((p) => p.item_code.toUpperCase() === req.item_code.toUpperCase())
       .sort((a, b) => getCalendarDaysDiff(b.po_date, a.po_date))[0];
 
-    const hasBoughtActive = preferred.some((p) => p.status === 'Active');
+    const recentPurchaseDays = policy.params.recent_purchase_days ?? 365;
+    const hasBoughtActive = hasBoughtFromActiveSupplier(
+      context.po_history,
+      context.suppliers,
+      req.item_code,
+      req.requirement_date,
+      recentPurchaseDays
+    );
+    const posInRecentWindow = getPOsInWindow(
+      context.po_history,
+      req.item_code,
+      req.requirement_date,
+      recentPurchaseDays
+    );
 
     const evalCtx: EvaluationContext = {
       item: {
@@ -180,9 +188,24 @@ export function runDecisionEngine(
       },
       history: {
         bought_from_active_365: hasBoughtActive,
-        po_count_365: preferred.reduce((sum, p) => sum + p.pos_in_window, 0),
+        po_count_365: posInRecentWindow.length,
         last_po_age_days: preferred[0]?.last_po_age_days ?? null,
         last_po_price: preferred[0]?.reference_price ?? null,
+        bought_from_active_fn: (days: number) =>
+          hasBoughtFromActiveSupplier(
+            context.po_history,
+            context.suppliers,
+            req.item_code,
+            req.requirement_date,
+            days
+          ),
+        po_count_fn: (days: number) =>
+          getPOsInWindow(
+            context.po_history,
+            req.item_code,
+            req.requirement_date,
+            days
+          ).length,
       },
       supplier: {
         preferred_1: preferred[0]
@@ -227,23 +250,40 @@ export function runDecisionEngine(
   assertNoBlockedOrInactiveSuppliers(requirements, context.suppliers);
 
   // 8. Generate exact 13-column output in input order
-  // Create lookup for lines by (pr_no, pr_line)
-  const lineToReqMap = new Map<string, { req: Requirement; line: any }>();
+  // Create lookup for lines by input index (with key fallback)
+  const lineToReqByIndex = new Map<number, { req: Requirement; line: any }>();
+  const lineToReqByKey = new Map<string, { req: Requirement; line: any }>();
   for (const req of requirements) {
     for (const line of req.lines) {
-      lineToReqMap.set(`${line.pr_no}:${line.pr_line}`, { req, line });
+      if (line.input_index !== undefined) {
+        lineToReqByIndex.set(line.input_index, { req, line });
+      }
+      lineToReqByKey.set(`${line.pr_no}:${line.pr_line}`, { req, line });
     }
+  }
+
+  const notProcessedByIndex = new Map<number, NotProcessedRow>();
+  const notProcessedByKey = new Map<string, NotProcessedRow>();
+  for (const np of notProcessed) {
+    if (np.input_index !== undefined) {
+      notProcessedByIndex.set(np.input_index, np);
+    }
+    notProcessedByKey.set(`${np.pr_no}:${np.pr_line}`, np);
   }
 
   const outputRows: DecisionOutputRow[] = [];
   const countsByRoute: Record<string, number> = {};
 
-  for (const raw of inputLines) {
+  for (let i = 0; i < inputLines.length; i++) {
+    const raw = inputLines[i];
     const prNo = String(raw.pr_no || '').trim();
     const prLine = String(raw.pr_line || '').trim();
     const key = `${prNo}:${prLine}`;
 
-    const np = notProcessedMap.get(key);
+    const np =
+      notProcessedByIndex.get(i) ??
+      (notProcessedByIndex.size === 0 ? notProcessedByKey.get(key) : undefined);
+
     if (np) {
       countsByRoute['NOT_PROCESSED'] = (countsByRoute['NOT_PROCESSED'] || 0) + 1;
       outputRows.push({
@@ -264,7 +304,10 @@ export function runDecisionEngine(
       continue;
     }
 
-    const matched = lineToReqMap.get(key);
+    const matched =
+      lineToReqByIndex.get(i) ??
+      (lineToReqByIndex.size === 0 ? lineToReqByKey.get(key) : undefined);
+
     if (matched) {
       const { req, line } = matched;
       const dec = req.decision!;
