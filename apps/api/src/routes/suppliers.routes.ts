@@ -1,7 +1,12 @@
 import { Router, Request, Response } from 'express';
 import { prisma } from '../prisma.js';
 import { loadEngineContext } from '../services/data.service.js';
-import { computePreferredSuppliers, toCalendarDateString, getAppNow } from '@cantill/engine';
+import {
+  computePreferredSuppliers,
+  selectPolicyVersionForDate,
+  toCalendarDateString,
+  getAppNow,
+} from '@cantill/engine';
 import { generatePreferredSuppliersCSV } from '../services/export.service.js';
 
 export const suppliersRouter = Router();
@@ -31,6 +36,7 @@ suppliersRouter.get('/preferred-suppliers', async (req: Request, res: Response) 
 
   const asOf = (req.query.as_of as string) || toCalendarDateString(getAppNow());
   const context = await loadEngineContext();
+  const policy = selectPolicyVersionForDate(asOf, context.policy_versions);
 
   const { preferred, excluded } = computePreferredSuppliers(
     itemCode,
@@ -38,12 +44,14 @@ suppliersRouter.get('/preferred-suppliers', async (req: Request, res: Response) 
     context.suppliers,
     context.po_history,
     context.contracts,
-    context.contract_lines
+    context.contract_lines,
+    policy
   );
 
   return res.json({
     item_code: itemCode,
     as_of: asOf,
+    policy_version: policy.version,
     preferred,
     excluded,
   });
@@ -53,6 +61,7 @@ suppliersRouter.get('/preferred-suppliers', async (req: Request, res: Response) 
 suppliersRouter.get('/preferred-suppliers/export', async (req: Request, res: Response) => {
   const asOf = (req.query.as_of as string) || toCalendarDateString(getAppNow());
   const context = await loadEngineContext();
+  const policy = selectPolicyVersionForDate(asOf, context.policy_versions);
 
   const allRankings: Array<{ item_code: string; ranks: any[] }> = [];
 
@@ -63,7 +72,8 @@ suppliersRouter.get('/preferred-suppliers/export', async (req: Request, res: Res
       context.suppliers,
       context.po_history,
       context.contracts,
-      context.contract_lines
+      context.contract_lines,
+      policy
     );
     allRankings.push({
       item_code: item.item_code,
