@@ -134,4 +134,57 @@ PR-BAD,1,2026-11-05 11:00,Charlie,Production,PUN2,ITM-1001,Ball bearing,10,NOS,,
     expect(res.body.diff).toBeDefined();
     expect(res.body.impactPreview).toBeDefined();
   });
+
+  it('Batch persistence and reprocessing preserves raw created_at, input order, and NOT_PROCESSED lines', async () => {
+    const batchCsv = `pr_no,pr_line,created_at,requester,department,plant,item_code,description,quantity,uom,estimated_unit_price,need_by_date,urgency
+PR-T1,1,2026-11-02 08:30,Alice,Production,PUN1,ITM-1048,High Tensile Hex Bolt M16x60,100,NOS,7.5,2026-11-15,Normal
+PR-T2,1,2026-11-03 09:15,Bob,Maintenance,PUN2,,Invalid plant free text,50,NOS,20,2026-11-16,Normal
+PR-T3,1,2026-11-04 10:45,Charlie,Safety,CHK1,ITM-1016,VCI Bag,200,NOS,22,2026-11-18,Normal`;
+
+    // 1. Process batch with persist=true
+    const postRes = await request(app)
+      .post('/api/process-batch?persist=true')
+      .set('Content-Type', 'text/csv')
+      .send(batchCsv);
+
+    expect(postRes.status).toBe(200);
+    const batchId = postRes.body.batchId;
+    expect(batchId).toBeDefined();
+    expect(postRes.body.outputRows.length).toBe(3);
+
+    // 2. Fetch batch lines from DB via GET /api/batches/:id
+    const getBatchRes = await request(app).get(`/api/batches/${batchId}`);
+    expect(getBatchRes.status).toBe(200);
+    expect(getBatchRes.body.lines.length).toBe(3); // ALL 3 lines persisted, including PUN2!
+
+    // Check line 0 created_at matches raw CSV timestamp date (2026-11-02)
+    const line0 = getBatchRes.body.lines.find((l: any) => l.input_index === 0);
+    expect(line0.raw_created_at).toBe('2026-11-02 08:30');
+    expect(line0.status).toBe('grouped');
+
+    // Check line 1 (PUN2) is persisted as not_processed with input_index 1
+    const line1 = getBatchRes.body.lines.find((l: any) => l.input_index === 1);
+    expect(line1.status).toBe('not_processed');
+    expect(line1.error_reason).toContain('Invalid plant');
+
+    // 3. Reprocess batch via POST /api/batches/:id/reprocess
+    const reprocessRes = await request(app)
+      .post(`/api/batches/${batchId}/reprocess`)
+      .send({});
+
+    expect(reprocessRes.status).toBe(200);
+    expect(reprocessRes.body.outputRows.length).toBe(3); // Exact 3 rows preserved
+    expect(reprocessRes.body.outputRows[1].route).toBe('NOT_PROCESSED');
+    expect(reprocessRes.body.outputRows[0].pr_no).toBe('PR-T1');
+    expect(reprocessRes.body.outputRows[1].pr_no).toBe('PR-T2');
+    expect(reprocessRes.body.outputRows[2].pr_no).toBe('PR-T3');
+
+    // 4. Export CSV via GET /api/batches/:id/export.csv
+    const exportRes = await request(app).get(`/api/batches/${batchId}/export.csv`);
+    expect(exportRes.status).toBe(200);
+    const exportLines = exportRes.text.trim().split('\n');
+    expect(exportLines.length).toBe(4); // 1 header + 3 rows
+    expect(exportLines[2]).toContain('NOT_PROCESSED');
+    expect(exportLines[2]).toContain('PR-T2');
+  });
 });
