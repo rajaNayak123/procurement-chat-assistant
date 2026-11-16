@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import request from 'supertest';
 import { app } from '../src/index.js';
+import { prisma } from '../src/prisma.js';
 
 describe('API Integration Tests', () => {
   it('GET /api/health returns healthy and app clock', async () => {
@@ -224,5 +225,156 @@ PR-T3,1,2026-11-04 10:45,Charlie,Safety,CHK1,ITM-1016,VCI Bag,200,NOS,22,2026-11
     expect(res.status).toBe(400);
     expect(res.body.needs_form_editor).toBe(true);
     expect(res.body.error).toContain('form editor');
+  });
+
+  it('Approve creates PurchaseOrder and POLine records and enforces state and identity guardrails', async () => {
+    // 1. Create a mock requirement in DB
+    const testReqId = `REQ-TEST-${Date.now()}`;
+    await prisma.requirement.create({
+      data: {
+        id: testReqId,
+        group_id: 'REQ-9999',
+        item_code: 'ITM-1001',
+        plant: 'PUN1',
+        requirement_date: '2026-11-05',
+        need_by_date: '2026-11-20',
+        total_quantity: 10,
+        uom: 'NOS',
+        valuation_price: 1500,
+        valuation_source: 'standard_price',
+        group_value_inr: 15000,
+        decision: 'PO',
+        route: 'SPOT_PO',
+        supplier_id: 'SUP-001',
+        po_unit_price: 1500,
+        status: 'pending',
+      },
+    });
+
+    // 2. Identity guardrail: Requester role cannot approve
+    const unauthRes = await request(app)
+      .post(`/api/requirements/${testReqId}/approve`)
+      .set('x-user-role', 'Requester')
+      .send({ actor: 'Aditi Sharma', role: 'Requester' });
+    expect(unauthRes.status).toBe(403);
+    expect(unauthRes.body.error).toContain('IDENTITY GUARDRAIL');
+
+    // 3. Authorized approval by Buyer
+    const approveRes = await request(app)
+      .post(`/api/requirements/${testReqId}/approve`)
+      .set('x-user-role', 'Buyer')
+      .send({ actor: 'Rajesh Nair', role: 'Buyer', comment: 'Approved spot PO' });
+    expect(approveRes.status).toBe(200);
+
+    // Verify PO and POLine rows created
+    const createdPO = await prisma.purchaseOrder.findFirst({
+      where: { plant: 'PUN1', route: 'SPOT_PO', supplier_id: 'SUP-001' },
+      orderBy: { created_at: 'desc' },
+    });
+    expect(createdPO).toBeDefined();
+    expect(createdPO?.status).toBe('approved');
+
+    const createdPOLine = await prisma.pOLine.findFirst({
+      where: { requirement_id: testReqId },
+    });
+    expect(createdPOLine).toBeDefined();
+    expect(createdPOLine?.item_code).toBe('ITM-1001');
+    expect(createdPOLine?.unit_price).toBe(1500);
+
+    // 4. State guardrail: Cannot override already approved requirement
+    const overrideRes = await request(app)
+      .post(`/api/requirements/${testReqId}/override`)
+      .set('x-user-role', 'Buyer')
+      .send({
+        actor: 'Rajesh Nair',
+        role: 'Buyer',
+        comment: 'Trying to override approved req',
+        new_route: 'RFQ',
+      });
+    expect(overrideRes.status).toBe(400);
+    expect(overrideRes.body.error).toContain('STATE GUARDRAIL');
+
+    // 5. Supplier guardrail: Unknown supplier rejected
+    const testReq2 = `REQ-TEST2-${Date.now()}`;
+    await prisma.requirement.create({
+      data: {
+        id: testReq2,
+        group_id: 'REQ-9998',
+        item_code: 'ITM-1001',
+        plant: 'PUN1',
+        requirement_date: '2026-11-05',
+        need_by_date: '2026-11-20',
+        total_quantity: 5,
+        uom: 'NOS',
+        valuation_price: 1500,
+        valuation_source: 'standard_price',
+        group_value_inr: 7500,
+        decision: 'PO',
+        route: 'SPOT_PO',
+        supplier_id: 'SUP-001',
+        po_unit_price: 1500,
+        status: 'pending',
+      },
+    });
+
+    const unknownSupRes = await request(app)
+      .post(`/api/requirements/${testReq2}/override`)
+      .set('x-user-role', 'Buyer')
+      .send({
+        actor: 'Rajesh Nair',
+        role: 'Buyer',
+        comment: 'Switching to unknown supplier',
+        new_supplier_id: 'SUP-NONEXISTENT-999',
+      });
+    expect(unknownSupRes.status).toBe(400);
+    expect(unknownSupRes.body.error).toContain('does not exist');
+  });
+
+  it('Chat multi-item submission persists all lines, assigns non-colliding PR number, and runs engine', async () => {
+    // 1. Create chat session
+    const sessionRes = await request(app)
+      .post('/api/chat/sessions')
+      .send({ user_name: 'Test Requester' });
+    const sessionId = sessionRes.body.session.id;
+
+    // 2. Send multi-item request
+    const msgRes = await request(app)
+      .post(`/api/chat/sessions/${sessionId}/messages`)
+      .send({ text: '2 laptops and 5 monitors for Bhosari by 30 Nov' });
+    expect(msgRes.status).toBe(200);
+    expect(msgRes.body.state.lines.length).toBe(2);
+
+    // 3. Fill urgency to make ready_to_confirm
+    const urgRes = await request(app)
+      .post(`/api/chat/sessions/${sessionId}/messages`)
+      .send({ text: 'Normal' });
+    expect(urgRes.status).toBe(200);
+    expect(urgRes.body.state.ready_to_confirm).toBe(true);
+
+    // 4. Confirm and submit
+    const confirmRes = await request(app)
+      .post(`/api/chat/sessions/${sessionId}/messages`)
+      .send({ text: 'confirm and submit' });
+    expect(confirmRes.status).toBe(200);
+    expect(confirmRes.body.prNumber).toBeDefined();
+    const prNumber = confirmRes.body.prNumber;
+
+    // 5. Verify ALL lines saved to pRLine
+    const savedLines = await prisma.pRLine.findMany({
+      where: { pr_no: prNumber },
+      orderBy: { pr_line: 'asc' },
+    });
+    expect(savedLines.length).toBe(2);
+    expect(savedLines[0].pr_line).toBe(1);
+    expect(savedLines[1].pr_line).toBe(2);
+    expect(savedLines[0].status).toBe('grouped');
+    expect(savedLines[1].status).toBe('grouped');
+
+    // 6. Verify decision engine was run and requirements exist in buyer queue
+    const linkedReq = await prisma.requirement.findFirst({
+      where: { id: savedLines[0].requirement_id! },
+    });
+    expect(linkedReq).toBeDefined();
+    expect(linkedReq?.status).toBe('pending');
   });
 });
