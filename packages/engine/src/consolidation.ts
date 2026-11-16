@@ -52,8 +52,12 @@ export function consolidatePOs(
       }
 
       // Measure from anchor requirement's created_at (not a sliding window)
-      const diffHours = getHoursDiff(reqCreatedAt, po.anchor_created_at);
-      if (diffHours >= 0 && diffHours <= consolidationWindowHours) {
+      // Exact millisecond comparison so truncated hours don't allow requirements beyond window to join
+      const diffMs =
+        parseDateFlexible(reqCreatedAt).getTime() -
+        parseDateFlexible(po.anchor_created_at).getTime();
+      const maxWindowMs = consolidationWindowHours * 3_600_000;
+      if (diffMs >= 0 && diffMs <= maxWindowMs) {
         joinedPO = po;
         break; // Joins earliest open PO it qualifies for
       }
