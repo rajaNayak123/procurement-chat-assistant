@@ -121,7 +121,19 @@ export interface Requirement {
   valuation_ref?: string; // contract id or po number relied upon
   contract_id?: string;
   group_value_inr: number; // total_quantity * valuation_price
+  flags?: string[];
   decision?: RequirementDecision;
+}
+
+export interface RuleTraceStep {
+  rule_id: string;
+  rule_name: string;
+  matched: boolean;
+  reason?: string;
+  failing_field?: string;
+  actual_value?: any;
+  expected_value?: any;
+  operator?: string;
 }
 
 export interface RequirementDecision {
@@ -143,12 +155,8 @@ export interface RequirementDecision {
   clause: string;
   reason: string;
   po_id?: string;
-  rule_trace: Array<{
-    rule_id: string;
-    rule_name: string;
-    matched: boolean;
-    reason?: string;
-  }>;
+  flags?: string[];
+  rule_trace: RuleTraceStep[];
 }
 
 export interface ConsolidatedPO {
