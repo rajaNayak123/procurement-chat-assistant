@@ -606,4 +606,251 @@ describe('Unit Tests: Engine Clauses and Components', () => {
     // Since PO is 400 days old, bought_from_active_365 is FALSE -> cannot do SPOT_PO (Rule 5.4), routes to RFQ (Rule 5.5)
     expect(res.outputRows[0].route).toBe('RFQ');
   });
+
+  it('Rule trace surfaces failing field, actual value, expected value, and operator', () => {
+    const batch: PRLineInput[] = [
+      {
+        pr_no: 'PR-TRACE-01',
+        pr_line: 1,
+        created_at: '2026-11-05 09:00',
+        requester: 'Alice',
+        department: 'Production',
+        plant: 'SYN-P1',
+        item_code: 'SYN-ITM-01',
+        description: 'Deep groove ball bearing 6308 ZZ',
+        quantity: 1,
+        uom: 'NOS',
+        estimated_unit_price: 250,
+        need_by_date: '2026-11-20',
+        urgency: 'Normal',
+      },
+    ];
+
+    const ctx: EngineContext = {
+      plants: SYNTHETIC_PLANTS,
+      items: SYNTHETIC_ITEMS,
+      suppliers: SYNTHETIC_SUPPLIERS,
+      po_history: SYNTHETIC_PO_HISTORY,
+      contracts: [],
+      contract_lines: [],
+      policy_versions: [DEFAULT_POLICY_V5],
+    };
+
+    const res = runDecisionEngine(batch, ctx);
+    const req = res.requirements[0];
+    expect(req).toBeDefined();
+    expect(req.decision).toBeDefined();
+
+    // Rule 5.1 is Capex (item.type eq 'Capex')
+    const capexTrace = req.decision?.rule_trace.find((t) => t.rule_id === '5.1');
+    expect(capexTrace).toBeDefined();
+    expect(capexTrace?.matched).toBe(false);
+    expect(capexTrace?.failing_field).toBe('item.type');
+    expect(capexTrace?.actual_value).toBe('Material');
+    expect(capexTrace?.operator).toBe('eq');
+    expect(capexTrace?.expected_value).toBe('Capex');
+    expect(capexTrace?.reason).toContain('item.type ("Material") eq "Capex"');
+  });
+
+  it('Flags like needs_capex_approval reach the decision and requirement', () => {
+    const capexItem = {
+      item_code: 'SYN-CAPEX-01',
+      description: 'CNC Milling Machine Center',
+      category: 'Machinery',
+      item_type: 'Capex',
+      uom: 'SET',
+      standard_price: 1500000,
+    };
+
+    const batch: PRLineInput[] = [
+      {
+        pr_no: 'PR-CAPEX-01',
+        pr_line: 1,
+        created_at: '2026-11-05 09:00',
+        requester: 'Alice',
+        department: 'Production',
+        plant: 'SYN-P1',
+        item_code: 'SYN-CAPEX-01',
+        description: 'CNC Milling Machine Center',
+        quantity: 1,
+        uom: 'SET',
+        estimated_unit_price: 1500000,
+        need_by_date: '2026-11-20',
+        urgency: 'Normal',
+      },
+    ];
+
+    const ctx: EngineContext = {
+      plants: SYNTHETIC_PLANTS,
+      items: [...SYNTHETIC_ITEMS, capexItem],
+      suppliers: SYNTHETIC_SUPPLIERS,
+      po_history: SYNTHETIC_PO_HISTORY,
+      contracts: [],
+      contract_lines: [],
+      policy_versions: [DEFAULT_POLICY_V5],
+    };
+
+    const res = runDecisionEngine(batch, ctx);
+    const req = res.requirements[0];
+    expect(req.decision?.route).toBe('CAPEX_SOURCING');
+    expect(req.decision?.flags).toContain('needs_capex_approval');
+    expect(req.flags).toContain('needs_capex_approval');
+  });
+
+  it('Executes price strategies last_po and standard, and supplier strategy preferred_n', () => {
+    const policyWithStrategies = JSON.parse(JSON.stringify(DEFAULT_POLICY_V5));
+    // Insert custom rules testing last_po and standard price strategies
+    policyWithStrategies.rules.unshift(
+      {
+        id: 'test-standard-price',
+        name: 'Standard Price Test',
+        enabled: true,
+        when: {
+          all: [{ field: 'plant', op: 'eq', value: 'P-STD' }],
+        },
+        then: {
+          decision: 'PO',
+          route: 'SPOT_PO',
+          supplier: 'preferred_1',
+          price: 'standard',
+        },
+      },
+      {
+        id: 'test-last-po-price',
+        name: 'Last PO Price Test',
+        enabled: true,
+        when: {
+          all: [{ field: 'plant', op: 'eq', value: 'P-LAST' }],
+        },
+        then: {
+          decision: 'PO',
+          route: 'SPOT_PO',
+          supplier: 'preferred_1',
+          price: 'last_po',
+        },
+      },
+      {
+        id: 'test-preferred-n',
+        name: 'Preferred N Sourcing Test',
+        enabled: true,
+        when: {
+          all: [{ field: 'plant', op: 'eq', value: 'P-PREF-N' }],
+        },
+        then: {
+          decision: 'SOURCING_REQUEST',
+          route: 'RFQ',
+          supplier: 'preferred_n',
+          suggest: 2,
+        },
+      }
+    );
+
+    const testItem = {
+      item_code: 'SYN-ITM-STRAT',
+      description: 'Test Strategy Bearing',
+      category: 'Mechanical Spares',
+      item_type: 'Material',
+      uom: 'NOS',
+      standard_price: 333,
+    };
+
+    const testHistory = [
+      {
+        po_number: 'PO-HIST-99',
+        po_line: 1,
+        po_date: '2026-11-01',
+        supplier_id: 'SYN-SUP-101',
+        supplier_name: 'Synthetic Bearings Ltd',
+        plant: 'SYN-P1',
+        item_code: 'SYN-ITM-STRAT',
+        description: 'Test Strategy Bearing',
+        quantity: 10,
+        unit_price: 444,
+        currency: 'INR',
+        status: 'Closed',
+      },
+    ];
+
+    const ctx: EngineContext = {
+      plants: [
+        ...SYNTHETIC_PLANTS,
+        { plant: 'P-STD', name: 'Plant Std' },
+        { plant: 'P-LAST', name: 'Plant Last' },
+        { plant: 'P-PREF-N', name: 'Plant Pref N' },
+      ],
+      items: [...SYNTHETIC_ITEMS, testItem],
+      suppliers: SYNTHETIC_SUPPLIERS,
+      po_history: testHistory,
+      contracts: [],
+      contract_lines: [],
+      policy_versions: [policyWithStrategies],
+    };
+
+    // 1. Test standard price
+    const resStd = runDecisionEngine(
+      [
+        {
+          pr_no: 'PR-S-01',
+          pr_line: 1,
+          created_at: '2026-11-05 09:00',
+          requester: 'Alice',
+          department: 'Production',
+          plant: 'P-STD',
+          item_code: 'SYN-ITM-STRAT',
+          description: 'Test Strategy Bearing',
+          quantity: 1,
+          uom: 'NOS',
+          need_by_date: '2026-11-20',
+          urgency: 'Normal',
+        },
+      ],
+      ctx
+    );
+    expect(resStd.requirements[0].decision?.po_unit_price).toBe(333); // standard price
+
+    // 2. Test last_po price
+    const resLast = runDecisionEngine(
+      [
+        {
+          pr_no: 'PR-L-01',
+          pr_line: 1,
+          created_at: '2026-11-05 09:00',
+          requester: 'Alice',
+          department: 'Production',
+          plant: 'P-LAST',
+          item_code: 'SYN-ITM-STRAT',
+          description: 'Test Strategy Bearing',
+          quantity: 1,
+          uom: 'NOS',
+          need_by_date: '2026-11-20',
+          urgency: 'Normal',
+        },
+      ],
+      ctx
+    );
+    expect(resLast.requirements[0].decision?.po_unit_price).toBe(444); // last PO price
+
+    // 3. Test preferred_n supplier strategy
+    const resPrefN = runDecisionEngine(
+      [
+        {
+          pr_no: 'PR-N-01',
+          pr_line: 1,
+          created_at: '2026-11-05 09:00',
+          requester: 'Alice',
+          department: 'Production',
+          plant: 'P-PREF-N',
+          item_code: 'SYN-ITM-STRAT',
+          description: 'Test Strategy Bearing',
+          quantity: 1,
+          uom: 'NOS',
+          need_by_date: '2026-11-20',
+          urgency: 'Normal',
+        },
+      ],
+      ctx
+    );
+    expect(resPrefN.requirements[0].decision?.route).toBe('RFQ');
+    expect(resPrefN.requirements[0].decision?.suggested_supplier_ids.length).toBe(2);
+  });
 });
