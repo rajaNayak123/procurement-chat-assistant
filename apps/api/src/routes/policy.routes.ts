@@ -109,7 +109,14 @@ policyRouter.post(
       });
     } catch (err: any) {
       console.error('Error parsing amendment document:', err);
-      return res.status(500).json({ error: err.message || 'Failed to parse policy document' });
+      const needsFormEditor =
+        err.message?.includes('No policy operations could be extracted') ||
+        err.message?.includes('form editor') ||
+        false;
+      return res.status(400).json({
+        error: err.message || 'Failed to parse policy document',
+        needs_form_editor: needsFormEditor,
+      });
     }
   }
 );
@@ -154,7 +161,74 @@ policyRouter.post('/policy/changes/chat', async (req: Request, res: Response) =>
     });
   } catch (err: any) {
     console.error('Error parsing chat change:', err);
-    return res.status(500).json({ error: err.message || 'Failed to parse policy change' });
+    const needsFormEditor =
+      err.message?.includes('No policy operations could be extracted') ||
+      err.message?.includes('form editor') ||
+      false;
+    return res.status(400).json({
+      error: err.message || 'Failed to parse policy change',
+      needs_form_editor: needsFormEditor,
+    });
+  }
+});
+
+// POST /api/policy/changes/form (Structured Form Editor input)
+policyRouter.post('/policy/changes/form', async (req: Request, res: Response) => {
+  try {
+    const { target_version, effective_from, operations, assumptions = [] } = req.body;
+    if (!operations || !Array.isArray(operations) || operations.length === 0) {
+      return res.status(400).json({ error: 'At least one structured operation is required.' });
+    }
+
+    const basePolicy = await getActivePolicy();
+    const [major, minor] = basePolicy.version.split('.').map(Number);
+    const resolvedTargetVersion = target_version || `${major}.${(minor || 0) + 1}`;
+    const resolvedEffectiveFrom = effective_from || '2026-11-25';
+
+    const changeSet: PolicyChangeSet = {
+      policy_id: basePolicy.policy_id,
+      base_version: basePolicy.version,
+      target_version: resolvedTargetVersion,
+      effective_from: resolvedEffectiveFrom,
+      is_amendment: true,
+      operations,
+      citations: operations.map((op, idx) => ({
+        operation_index: idx,
+        sentence: op.citation || `Structured edit: ${op.op}`,
+      })),
+      assumptions,
+    };
+
+    const candidatePolicy = applyChangeSet(basePolicy, changeSet);
+    const diff = diffPolicies(basePolicy, candidatePolicy);
+    const lintIssues = lintPolicy(candidatePolicy);
+    const impactPreview = await computeImpactPreview(basePolicy, candidatePolicy);
+
+    const saved = await prisma.policyChangeSet.create({
+      data: {
+        policy_id: changeSet.policy_id,
+        base_version: changeSet.base_version,
+        target_version: changeSet.target_version,
+        effective_from: changeSet.effective_from,
+        is_amendment: changeSet.is_amendment,
+        operations: JSON.stringify(changeSet.operations),
+        citations: JSON.stringify(changeSet.citations),
+        assumptions: JSON.stringify(changeSet.assumptions),
+        status: 'pending',
+      },
+    });
+
+    return res.json({
+      change_set_id: saved.id,
+      changeSet,
+      diff,
+      lintIssues,
+      impactPreview,
+      candidatePolicy,
+    });
+  } catch (err: any) {
+    console.error('Error applying structured form change:', err);
+    return res.status(400).json({ error: err.message || 'Failed to process structured form change' });
   }
 });
 
