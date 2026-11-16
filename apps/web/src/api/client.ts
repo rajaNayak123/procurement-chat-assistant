@@ -49,7 +49,11 @@ export const api = {
   approveRequirement: (id: string, payload: { actor: string; role: string; comment?: string }) =>
     apiRequest(`/requirements/${id}/approve`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'x-user-name': payload.actor,
+        'x-user-role': payload.role,
+      },
       body: JSON.stringify(payload),
     }),
   overrideRequirement: (
@@ -66,7 +70,11 @@ export const api = {
   ) =>
     apiRequest(`/requirements/${id}/override`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'x-user-name': payload.actor,
+        'x-user-role': payload.role,
+      },
       body: JSON.stringify(payload),
     }),
 
