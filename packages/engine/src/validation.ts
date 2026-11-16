@@ -17,7 +17,8 @@ export function validateAndResolvePRBatch(
   const notProcessed: NotProcessedRow[] = [];
   const seenPrKeys = new Set<string>();
 
-  for (const raw of rawLines) {
+  for (let i = 0; i < rawLines.length; i++) {
+    const raw = rawLines[i];
     const prNo = String(raw.pr_no || '').trim();
     const prLine = String(raw.pr_line || '').trim();
     const prKey = `${prNo}:${prLine}`;
@@ -25,6 +26,7 @@ export function validateAndResolvePRBatch(
     // 1. Missing PR No or PR Line
     if (!prNo || !prLine) {
       notProcessed.push({
+        input_index: i,
         pr_no: prNo,
         pr_line: prLine,
         reason: 'Missing pr_no or pr_line',
@@ -36,6 +38,7 @@ export function validateAndResolvePRBatch(
     // 2. Duplicate within batch
     if (seenPrKeys.has(prKey)) {
       notProcessed.push({
+        input_index: i,
         pr_no: prNo,
         pr_line: prLine,
         reason: `Duplicate pr_no and pr_line (${prKey}) in batch`,
@@ -50,6 +53,7 @@ export function validateAndResolvePRBatch(
     if (!validPlants.has(rawPlant)) {
       const allowedList = Array.from(validPlants).join(', ');
       notProcessed.push({
+        input_index: i,
         pr_no: prNo,
         pr_line: prLine,
         reason: `Invalid plant "${raw.plant}". Allowed plants are: ${allowedList}`,
@@ -62,6 +66,7 @@ export function validateAndResolvePRBatch(
     const parsedQty = typeof raw.quantity === 'number' ? raw.quantity : parseFloat(String(raw.quantity).replace(/,/g, ''));
     if (isNaN(parsedQty) || parsedQty <= 0) {
       notProcessed.push({
+        input_index: i,
         pr_no: prNo,
         pr_line: prLine,
         reason: `Invalid quantity "${raw.quantity}". Must be a positive number greater than 0`,
@@ -74,6 +79,7 @@ export function validateAndResolvePRBatch(
     const parsedCreatedAt = parseDateFlexible(raw.created_at);
     if (isNaN(parsedCreatedAt.getTime())) {
       notProcessed.push({
+        input_index: i,
         pr_no: prNo,
         pr_line: prLine,
         reason: `Invalid or missing created_at date "${raw.created_at}"`,
@@ -85,6 +91,7 @@ export function validateAndResolvePRBatch(
     const parsedNeedBy = parseDateFlexible(raw.need_by_date);
     if (isNaN(parsedNeedBy.getTime())) {
       notProcessed.push({
+        input_index: i,
         pr_no: prNo,
         pr_line: prLine,
         reason: `Invalid or missing need_by_date "${raw.need_by_date}"`,
@@ -98,6 +105,7 @@ export function validateAndResolvePRBatch(
     const rawDesc = raw.description ? String(raw.description).trim() : '';
     if (!rawCode && !rawDesc) {
       notProcessed.push({
+        input_index: i,
         pr_no: prNo,
         pr_line: prLine,
         reason: 'Both item_code and description are missing or empty',
@@ -145,6 +153,7 @@ export function validateAndResolvePRBatch(
     }
 
     validLines.push({
+      input_index: i,
       pr_no: prNo,
       pr_line: parseInt(prLine, 10) || 1,
       created_at: parsedCreatedAt.toISOString(),
