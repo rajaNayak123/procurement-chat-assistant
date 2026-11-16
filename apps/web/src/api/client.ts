@@ -104,7 +104,15 @@ export const api = {
   getPolicyChange: (id: string) => apiRequest(`/policy/changes/${id}`),
   approvePolicyChange: (
     id: string,
-    payload: { actor: string; role: string; version?: string; effective_from?: string; comment?: string }
+    payload: {
+      actor: string;
+      role: string;
+      version?: string;
+      effective_from?: string;
+      comment?: string;
+      confirmed_assumptions?: string[];
+      all_assumptions_confirmed?: boolean;
+    }
   ) =>
     apiRequest(`/policy/changes/${id}/approve`, {
       method: 'POST',
