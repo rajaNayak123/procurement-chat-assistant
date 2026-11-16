@@ -222,7 +222,40 @@ export function fallbackParseAmendment(
       continue;
     }
 
-    // 8. Disable/Remove rule: "disable rule 5.1" or "remove rule 5.1"
+    // 8. Ranking weights change: "change frequency weight to 0.35" or "set ranking weight for recency to 0.20"
+    const weightMatch = s.match(/(?:change|set)\s+(?:ranking\s+)?(?:weight\s+for\s+)?(frequency|recency|contract|on_time|quality)\s+(?:weight\s+)?to\s+([0-9.]+)/i);
+    if (weightMatch) {
+      const field = weightMatch[1].toLowerCase();
+      const weightVal = parseFloat(weightMatch[2]);
+      if (!isNaN(weightVal)) {
+        operations.push({
+          op: 'set_param',
+          param: `ranking.weights.${field}`,
+          value: weightVal,
+          citation: s,
+        });
+        citations.push({ operation_index: operations.length - 1, sentence: s });
+        assumptions.push(`Updated ranking weight for ${field} to ${weightVal}`);
+        continue;
+      }
+    }
+
+    // 9. Supplier eligibility threshold: "set minimum on-time to 90%" or "require minimum on-time of 90%"
+    const minOnTimeMatch = s.match(/(?:set|require)\s+minimum\s+on-?time\s+(?:percentage\s+)?(?:to|of)?\s*(\d+)\s*%/i);
+    if (minOnTimeMatch) {
+      const minPct = parseInt(minOnTimeMatch[1], 10);
+      operations.push({
+        op: 'set_param',
+        param: 'ranking.min_on_time_pct',
+        value: minPct,
+        citation: s,
+      });
+      citations.push({ operation_index: operations.length - 1, sentence: s });
+      assumptions.push(`Set minimum supplier on-time eligibility threshold to ${minPct}%`);
+      continue;
+    }
+
+    // 10. Disable/Remove rule: "disable rule 5.1" or "remove rule 5.1"
     const removeMatch = s.match(/(?:disable|remove)\s+rule\s+([\d]+(?:\.[\d]+)*)/i);
     if (removeMatch) {
       const ruleId = removeMatch[1];

@@ -62,9 +62,20 @@ export async function processBatch(
     fileName?: string;
     persist?: boolean;
     policy_version?: string;
+    as_of_policy?: 'requirement_date' | 'force' | string;
   } = {}
 ): Promise<EngineExecutionResult & { batchId?: string }> {
-  const context = await loadEngineContext(options.policy_version);
+  // If as_of_policy is force without explicit policy_version, use latest active policy
+  let forcedVersion = options.policy_version;
+  if (options.as_of_policy === 'force' && !forcedVersion) {
+    const active = await prisma.policyVersion.findFirst({
+      where: { status: { in: ['approved', 'active'] } },
+      orderBy: { effective_from: 'desc' },
+    });
+    if (active) forcedVersion = active.version;
+  }
+
+  const context = await loadEngineContext(forcedVersion);
   const result = runDecisionEngine(inputLines, context);
 
   let batchId: string | undefined = undefined;

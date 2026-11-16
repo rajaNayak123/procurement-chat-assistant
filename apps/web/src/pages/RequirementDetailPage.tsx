@@ -86,16 +86,16 @@ export const RequirementDetailPage: React.FC<RequirementDetailPageProps> = ({
   const { requirement, lines, preferred_suppliers, candidate_contracts, overrides } = data;
   const isApproved = requirement.status === 'approved';
 
-  // Primary action button label dynamically adapts
-  let approveLabel = 'Approve Decision';
+  // Primary action button label dynamically adapts (Section 8 Table)
+  let approveLabel = 'Approve';
   if (requirement.route?.includes('PO')) {
-    approveLabel = `Create Purchase Order (${requirement.po_id || 'New PO'})`;
+    approveLabel = requirement.po_id ? `Create PO (${requirement.po_id})` : 'Create PO';
   } else if (requirement.route === 'CAPEX_SOURCING') {
-    approveLabel = user.role === 'Procurement Head' ? 'Approve Capex Sourcing' : 'Send for Capex Approval';
+    approveLabel = user.role === 'Procurement Head' ? 'Approve capex' : 'Send for capex approval';
   } else if (requirement.route === 'RFQ') {
-    approveLabel = 'Initiate RFQ Sourcing';
+    approveLabel = 'Create RFQ';
   } else if (requirement.route === 'RFP') {
-    approveLabel = 'Initiate RFP Sourcing';
+    approveLabel = 'Create RFP';
   }
 
   const handleApprove = async () => {

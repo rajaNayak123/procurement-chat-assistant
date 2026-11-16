@@ -31,11 +31,13 @@ batchRouter.post(
       const persist = req.query.persist === 'true';
       const format = req.query.format === 'csv' ? 'csv' : 'json';
       const policyVersion = req.query.policy_version as string | undefined;
+      const asOfPolicy = req.query.as_of_policy as string | undefined;
 
       const result = await processBatch(inputLines, {
         fileName,
         persist,
         policy_version: policyVersion,
+        as_of_policy: asOfPolicy,
       });
 
       if (format === 'csv') {

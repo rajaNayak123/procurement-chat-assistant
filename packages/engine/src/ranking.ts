@@ -317,10 +317,13 @@ export function getSourcingSuggestions(
     return s.categories.some((cat) => cat.trim().toLowerCase() === itemCategory);
   });
 
-  // Sort by: 0.5 * on_time/100 + 0.5 * quality/5, tie by supplier id
+  // Sort by policy topup weights (default: 0.5 * on_time/100 + 0.5 * quality/5), tie by supplier id
+  const onTimeW = policy?.params?.topup?.weights?.on_time ?? 0.5;
+  const qualityW = policy?.params?.topup?.weights?.quality ?? 0.5;
+
   topupCandidates.sort((a, b) => {
-    const scoreA = 0.5 * (a.on_time_pct / 100) + 0.5 * (a.quality_rating / 5);
-    const scoreB = 0.5 * (b.on_time_pct / 100) + 0.5 * (b.quality_rating / 5);
+    const scoreA = onTimeW * (a.on_time_pct / 100) + qualityW * (a.quality_rating / 5);
+    const scoreB = onTimeW * (b.on_time_pct / 100) + qualityW * (b.quality_rating / 5);
     if (Math.abs(scoreB - scoreA) > 0.0001) {
       return scoreB - scoreA;
     }

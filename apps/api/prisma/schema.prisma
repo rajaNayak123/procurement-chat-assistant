@@ -237,3 +237,66 @@ model AuditLog {
   diff_json   String?  // Before/after JSON diff
   created_at  DateTime @default(now())
 }
+
+model RequirementLine {
+  id             String   @id @default(uuid())
+  requirement_id String
+  pr_line_id     String
+  quantity       Float
+  uom            String
+  created_at     DateTime @default(now())
+}
+
+model DecisionRun {
+  id                 String   @id @default(uuid())
+  batch_id           String?
+  policy_version     String
+  total_requirements Int
+  created_at         DateTime @default(now())
+}
+
+model Decision {
+  id             String   @id @default(uuid())
+  requirement_id String
+  policy_version String
+  clause         String?
+  decision       String   // PO or SOURCING_REQUEST
+  route          String   // CONTRACT_PO, SPOT_PO, etc.
+  supplier_id    String?
+  unit_price     Float?
+  trace_json     String?
+  inputs_json    String?
+  created_at     DateTime @default(now())
+}
+
+model POLine {
+  id             String   @id @default(uuid())
+  po_id          String
+  requirement_id String
+  item_code      String
+  description    String
+  quantity       Float
+  uom            String
+  unit_price     Float
+  total_price    Float
+  created_at     DateTime @default(now())
+}
+
+model SourcingRequest {
+  id                  String   @id @default(uuid())
+  requirement_id      String
+  item_code           String
+  route               String
+  estimated_value     Float
+  suggested_suppliers String   // Semicolon separated
+  status              String   @default("open")
+  created_at          DateTime @default(now())
+}
+
+model PreferredSnapshot {
+  id            String   @id @default(uuid())
+  item_code     String
+  as_of_date    String
+  snapshot_json String
+  created_at    DateTime @default(now())
+}
