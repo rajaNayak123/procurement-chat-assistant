@@ -146,6 +146,7 @@ model Requirement {
   route            String?  // CONTRACT_PO, SPOT_PO, etc.
   supplier_id      String?
   po_unit_price    Float?
+  contract_id      String?
   suggested_suppliers String? // Semicolon separated
   policy_version   String?
   clause           String?
@@ -273,6 +274,7 @@ model Decision {
   decision       String   // PO or SOURCING_REQUEST
   route          String   // CONTRACT_PO, SPOT_PO, etc.
   supplier_id    String?
+  contract_id    String?
   unit_price     Float?
   trace_json     String?
   inputs_json    String?
