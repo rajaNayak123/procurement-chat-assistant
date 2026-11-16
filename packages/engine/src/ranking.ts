@@ -107,15 +107,39 @@ export function computePreferredSuppliers(
 
   const excluded: Array<{ supplier: SupplierMaster; reason: string }> = [];
 
+  const excludedStatuses = new Set(
+    policy?.params?.excluded_supplier_statuses ?? ['Blocked', 'Inactive']
+  );
+  const minOnTime = rankingParams.min_on_time_pct;
+  const minQuality = rankingParams.min_quality;
+
   for (const sId of candidateSupplierIds) {
     const supplier = supplierMap.get(sId);
     if (!supplier) continue;
 
-    // Check status
-    if (supplier.status !== 'Active') {
+    // 1. Check status against excluded statuses
+    if (excludedStatuses.has(supplier.status) || supplier.status !== 'Active') {
       excluded.push({
         supplier,
         reason: `Supplier status is ${supplier.status}`,
+      });
+      continue;
+    }
+
+    // 2. Check minimum on-time delivery threshold
+    if (minOnTime !== null && minOnTime !== undefined && supplier.on_time_pct < minOnTime) {
+      excluded.push({
+        supplier,
+        reason: `On-time rating ${supplier.on_time_pct}% is below required minimum ${minOnTime}%`,
+      });
+      continue;
+    }
+
+    // 3. Check minimum quality rating threshold
+    if (minQuality !== null && minQuality !== undefined && supplier.quality_rating < minQuality) {
+      excluded.push({
+        supplier,
+        reason: `Quality rating ${supplier.quality_rating} is below required minimum ${minQuality}`,
       });
       continue;
     }
@@ -307,10 +331,18 @@ export function getSourcingSuggestions(
     return suggestions.slice(0, targetCount);
   }
 
-  // 2. Sourcing top-up (Section 6.4): Active suppliers listing item's category
+  // 2. Sourcing top-up (Section 6.4): Active suppliers listing item's category meeting eligibility thresholds
   const itemCategory = item.category.trim().toLowerCase();
+  const excludedStatuses = new Set(
+    policy?.params?.excluded_supplier_statuses ?? ['Blocked', 'Inactive']
+  );
+  const minOnTime = policy?.params?.ranking?.min_on_time_pct;
+  const minQuality = policy?.params?.ranking?.min_quality;
+
   const topupCandidates = suppliers.filter((s) => {
-    if (s.status !== 'Active') return false;
+    if (excludedStatuses.has(s.status) || s.status !== 'Active') return false;
+    if (minOnTime !== null && minOnTime !== undefined && s.on_time_pct < minOnTime) return false;
+    if (minQuality !== null && minQuality !== undefined && s.quality_rating < minQuality) return false;
     if (addedSet.has(s.supplier_id)) return false;
 
     // Check if supplier categories contain item category
