@@ -61,10 +61,11 @@ export async function processBatch(
   options: {
     fileName?: string;
     persist?: boolean;
+    batchId?: string;
     policy_version?: string;
     as_of_policy?: 'requirement_date' | 'force' | string;
   } = {}
-): Promise<EngineExecutionResult & { batchId?: string }> {
+): Promise<EngineExecutionResult & { batchId?: string; runId?: string }> {
   // If as_of_policy is force without explicit policy_version, use latest active policy
   let forcedVersion = options.policy_version;
   if (options.as_of_policy === 'force' && !forcedVersion) {
@@ -78,65 +79,171 @@ export async function processBatch(
   const context = await loadEngineContext(forcedVersion);
   const result = runDecisionEngine(inputLines, context);
 
-  let batchId: string | undefined = undefined;
+  let batchId: string | undefined = options.batchId;
+  let runId: string | undefined = undefined;
 
   if (options.persist) {
-    batchId = `BATCH-${Date.now()}`;
+    batchId = batchId || `BATCH-${Date.now()}`;
     const fileName = options.fileName || 'uploaded_batch.csv';
 
-    // 1. Create batch record
-    await prisma.pRBatch.create({
-      data: {
+    // 1. Create or update batch record
+    await prisma.pRBatch.upsert({
+      where: { id: batchId },
+      create: {
         id: batchId,
         file_name: fileName,
         total_lines: inputLines.length,
         status: 'processed',
       },
+      update: {
+        total_lines: inputLines.length,
+        status: 'processed',
+      },
     });
 
-    // 2. Persist PR lines
+    // 2. Create DecisionRun record to scope requirements and POs
+    const appliedPolicy =
+      result.summary.policyVersionsUsed[0] || context.policy_versions[0]?.version || '5.0';
+    const run = await prisma.decisionRun.create({
+      data: {
+        batch_id: batchId,
+        policy_version: appliedPolicy,
+        total_requirements: result.requirements.length,
+      },
+    });
+    runId = run.id;
+
+    // Lookup mapping for processed lines
+    const lineToReqMap = new Map<string, { req: (typeof result.requirements)[0]; line: any }>();
     for (const req of result.requirements) {
       for (const line of req.lines) {
+        lineToReqMap.set(`${line.pr_no}:${line.pr_line}`, { req, line });
+      }
+    }
+
+    // 3. Persist ALL PR lines in original input order, including NOT_PROCESSED
+    for (let index = 0; index < inputLines.length; index++) {
+      const raw = inputLines[index];
+      const prNo = String(raw.pr_no || '').trim();
+      const prLine =
+        typeof raw.pr_line === 'number'
+          ? raw.pr_line
+          : parseInt(String(raw.pr_line || index + 1), 10) || index + 1;
+      const rawCreatedAt = String(raw.created_at || '').trim();
+      const parsedCreatedAt =
+        rawCreatedAt && !isNaN(new Date(rawCreatedAt).getTime())
+          ? new Date(rawCreatedAt)
+          : new Date();
+
+      const matched = lineToReqMap.get(`${prNo}:${prLine}`);
+      const outputRow = result.outputRows[index];
+      const lineDbId = `${batchId}_line_${index}`;
+
+      if (matched) {
+        const scopedReqId = `${run.id}_${matched.req.group_id}`;
         await prisma.pRLine.upsert({
-          where: { id: `${line.pr_no}-${line.pr_line}` },
+          where: { id: lineDbId },
           create: {
-            id: `${line.pr_no}-${line.pr_line}`,
+            id: lineDbId,
             batch_id: batchId,
-            pr_no: line.pr_no,
-            pr_line: line.pr_line,
-            requester: line.requester,
-            department: line.department,
-            plant: line.plant,
-            input_item_code: line.input_item_code,
-            resolved_item_code: line.resolved_item_code,
-            description: line.description,
-            quantity: line.quantity,
-            uom: line.uom,
-            estimated_unit_price: line.estimated_unit_price,
-            need_by_date: line.need_by_date,
-            urgency: line.urgency,
-            match_method: line.match_method,
-            match_confidence: line.match_confidence,
-            flags: JSON.stringify(line.flags),
-            requirement_id: req.group_id,
+            input_index: index,
+            pr_no: prNo,
+            pr_line: prLine,
+            created_at: parsedCreatedAt,
+            raw_created_at: rawCreatedAt,
+            raw_json: JSON.stringify(raw),
+            requester: String(raw.requester || '').trim(),
+            department: String(raw.department || '').trim(),
+            plant: String(raw.plant || '').trim(),
+            input_item_code: raw.item_code ? String(raw.item_code).trim() : null,
+            resolved_item_code: matched.line.resolved_item_code,
+            description: String(raw.description || '').trim(),
+            quantity:
+              typeof raw.quantity === 'number'
+                ? raw.quantity
+                : parseFloat(String(raw.quantity || 0)) || 0,
+            uom: String(raw.uom || 'NOS').trim(),
+            estimated_unit_price: raw.estimated_unit_price
+              ? parseFloat(String(raw.estimated_unit_price))
+              : null,
+            need_by_date: String(raw.need_by_date || '').trim(),
+            urgency: String(raw.urgency || 'Normal').trim(),
+            match_method: matched.line.match_method,
+            match_confidence: matched.line.match_confidence,
+            flags: JSON.stringify(matched.line.flags || []),
             status: 'grouped',
+            requirement_id: scopedReqId,
           },
           update: {
+            input_index: index,
+            created_at: parsedCreatedAt,
+            raw_created_at: rawCreatedAt,
+            raw_json: JSON.stringify(raw),
+            requirement_id: scopedReqId,
+            resolved_item_code: matched.line.resolved_item_code,
+            status: 'grouped',
+            flags: JSON.stringify(matched.line.flags || []),
+          },
+        });
+      } else {
+        // NOT_PROCESSED line: must be saved so row count and input order are preserved
+        await prisma.pRLine.upsert({
+          where: { id: lineDbId },
+          create: {
+            id: lineDbId,
             batch_id: batchId,
-            quantity: line.quantity,
-            need_by_date: line.need_by_date,
-            requirement_id: req.group_id,
+            input_index: index,
+            pr_no: prNo,
+            pr_line: prLine,
+            created_at: parsedCreatedAt,
+            raw_created_at: rawCreatedAt,
+            raw_json: JSON.stringify(raw),
+            requester: String(raw.requester || '').trim(),
+            department: String(raw.department || '').trim(),
+            plant: String(raw.plant || '').trim(),
+            input_item_code: raw.item_code ? String(raw.item_code).trim() : null,
+            resolved_item_code: raw.item_code ? String(raw.item_code).trim() : 'NEW',
+            description: String(raw.description || '').trim(),
+            quantity:
+              typeof raw.quantity === 'number'
+                ? raw.quantity
+                : parseFloat(String(raw.quantity || 0)) || 0,
+            uom: String(raw.uom || 'NOS').trim(),
+            estimated_unit_price: raw.estimated_unit_price
+              ? parseFloat(String(raw.estimated_unit_price))
+              : null,
+            need_by_date: String(raw.need_by_date || '').trim(),
+            urgency: String(raw.urgency || 'Normal').trim(),
+            match_method: 'none',
+            match_confidence: 0,
+            flags: '[]',
+            status: 'not_processed',
+            requirement_id: null,
+            error_reason: outputRow?.reason || 'Invalid line',
+          },
+          update: {
+            input_index: index,
+            created_at: parsedCreatedAt,
+            raw_created_at: rawCreatedAt,
+            raw_json: JSON.stringify(raw),
+            status: 'not_processed',
+            requirement_id: null,
+            error_reason: outputRow?.reason || 'Invalid line',
           },
         });
       }
     }
 
-    // 3. Persist Requirements
+    // 4. Persist Requirements (scoped to DecisionRun: ${run.id}_${req.group_id})
     for (const req of result.requirements) {
+      const scopedReqId = `${run.id}_${req.group_id}`;
       await prisma.requirement.upsert({
-        where: { id: req.group_id },
+        where: { id: scopedReqId },
         create: {
-          id: req.group_id,
+          id: scopedReqId,
+          run_id: run.id,
+          batch_id: batchId,
+          group_id: req.group_id,
           item_code: req.item_code,
           plant: req.plant,
           requirement_date: req.requirement_date,
@@ -155,7 +262,7 @@ export async function processBatch(
           policy_version: req.decision?.policy_version,
           clause: req.decision?.clause,
           reason: req.decision?.reason,
-          po_id: req.decision?.po_id,
+          po_id: req.decision?.po_id || null,
           rule_trace: JSON.stringify(req.decision?.rule_trace),
           status: 'pending',
         },
@@ -168,18 +275,38 @@ export async function processBatch(
           policy_version: req.decision?.policy_version,
           clause: req.decision?.clause,
           reason: req.decision?.reason,
-          po_id: req.decision?.po_id,
+          po_id: req.decision?.po_id || null,
           rule_trace: JSON.stringify(req.decision?.rule_trace),
         },
       });
+
+      // Persist RequirementLine records linking requirement to PR lines
+      for (const line of req.lines) {
+        const matchingIndex = inputLines.findIndex(
+          (l) => String(l.pr_no).trim() === line.pr_no && Number(l.pr_line) === line.pr_line
+        );
+        const lineDbId = matchingIndex >= 0 ? `${batchId}_line_${matchingIndex}` : `${line.pr_no}-${line.pr_line}`;
+        await prisma.requirementLine.create({
+          data: {
+            requirement_id: scopedReqId,
+            pr_line_id: lineDbId,
+            quantity: line.quantity,
+            uom: line.uom,
+          },
+        });
+      }
     }
 
-    // 4. Persist Consolidated POs
+    // 5. Persist Consolidated POs (scoped to DecisionRun: ${run.id}_${po.po_id})
     for (const po of result.consolidatedPOs) {
+      const scopedPoId = `${run.id}_${po.po_id}`;
       await prisma.purchaseOrder.upsert({
-        where: { id: po.po_id },
+        where: { id: scopedPoId },
         create: {
-          id: po.po_id,
+          id: scopedPoId,
+          run_id: run.id,
+          batch_id: batchId,
+          po_id: po.po_id,
           supplier_id: po.supplier_id,
           plant: po.plant,
           route: po.route,
@@ -193,5 +320,5 @@ export async function processBatch(
     }
   }
 
-  return { ...result, batchId };
+  return { ...result, batchId, runId };
 }
