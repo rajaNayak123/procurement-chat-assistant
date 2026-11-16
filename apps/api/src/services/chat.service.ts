@@ -178,10 +178,12 @@ export async function processUserChatMessage(
           clause: req.decision?.clause,
           reason: req.decision?.reason,
           po_id: req.decision?.po_id || null,
+          flags: JSON.stringify(req.decision?.flags || req.flags || []),
           rule_trace: JSON.stringify(req.decision?.rule_trace),
           status: 'pending',
         },
         update: {
+          flags: JSON.stringify(req.decision?.flags || req.flags || []),
           status: 'pending',
         },
       });
