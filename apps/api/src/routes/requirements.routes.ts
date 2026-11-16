@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { prisma } from '../prisma.js';
 import { logAuditEvent } from '../services/audit.service.js';
 import { loadEngineContext } from '../services/data.service.js';
-import { computePreferredSuppliers } from '@cantill/engine';
+import { computePreferredSuppliers, selectPolicyVersionForDate } from '@cantill/engine';
 
 export const requirementsRouter = Router();
 
@@ -46,15 +46,21 @@ requirementsRouter.get('/requirements/:id', async (req: Request, res: Response) 
     },
   });
 
-  // Fetch candidate contracts and preferred suppliers for explainability
+  // Fetch candidate contracts and preferred suppliers for explainability using requirement's policy
   const context = await loadEngineContext();
+  const policy = selectPolicyVersionForDate(
+    requirement.requirement_date,
+    context.policy_versions,
+    requirement.policy_version || undefined
+  );
   const { preferred, excluded } = computePreferredSuppliers(
     requirement.item_code,
     requirement.requirement_date,
     context.suppliers,
     context.po_history,
     context.contracts,
-    context.contract_lines
+    context.contract_lines,
+    policy
   );
 
   const candidateContracts = context.contracts
