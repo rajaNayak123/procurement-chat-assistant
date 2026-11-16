@@ -110,34 +110,126 @@ requirementsRouter.post('/requirements/:id/approve', async (req: Request, res: R
     return res.status(404).json({ error: 'Requirement not found' });
   }
 
+  // STATE GUARDRAIL: Cannot re-approve already approved requirement
   if (requirement.status === 'approved') {
-    return res.status(400).json({ error: 'Requirement is already approved and locked' });
+    return res.status(400).json({ error: 'STATE GUARDRAIL: Requirement is already approved and locked' });
   }
 
-  const { actor = 'Buyer Demo', role = 'Buyer', comment = '' } = req.body;
+  // IDENTITY GUARDRAIL: Resolve identity from headers or body and enforce authorized roles
+  const headerRole = req.headers['x-user-role'] as string | undefined;
+  const headerActor = req.headers['x-user-name'] as string | undefined;
+  const actor = headerActor || req.body.actor || 'Buyer Demo';
+  const role = headerRole || req.body.role || 'Buyer';
 
-  // Capex requires second approval by Procurement Head
-  if (requirement.route === 'CAPEX_SOURCING' && role !== 'Procurement Head') {
+  const ALLOWED_ROLES = ['Buyer', 'Procurement Head'];
+  if (!ALLOWED_ROLES.includes(role)) {
     return res.status(403).json({
-      error: 'Capex requirements require approval from Procurement Head',
+      error: `IDENTITY GUARDRAIL: Role "${role}" is not authorized. Requesters cannot approve requirements.`,
     });
   }
 
-  // If CONTRACT_PO, record ledger consumption
-  if (requirement.route === 'CONTRACT_PO' && requirement.supplier_id) {
-    // Find contract
-    const context = await loadEngineContext();
-    const contract = context.contracts.find((c) => c.supplier_id === requirement.supplier_id);
-    if (contract) {
-      await prisma.contractConsumption.create({
+  // Capex requires approval by Procurement Head
+  if (requirement.route === 'CAPEX_SOURCING' && role !== 'Procurement Head') {
+    return res.status(403).json({
+      error: 'IDENTITY GUARDRAIL: Capex requirements require approval from Procurement Head',
+    });
+  }
+
+  const { comment = '' } = req.body;
+  const isPO = requirement.decision === 'PO' || ['CONTRACT_PO', 'EMERGENCY_PO', 'SPOT_PO'].includes(requirement.route || '');
+
+  // 1. If PO, create/update purchase_orders and po_lines rows
+  if (isPO) {
+    const poId = requirement.po_id || `PO-${requirement.group_id ? requirement.group_id.replace('REQ-', '') : String(Date.now()).slice(-4)}`;
+    const poDbId = requirement.run_id ? `${requirement.run_id}_${poId}` : poId;
+
+    await prisma.purchaseOrder.upsert({
+      where: { id: poDbId },
+      create: {
+        id: poDbId,
+        run_id: requirement.run_id,
+        batch_id: requirement.batch_id,
+        po_id: poId,
+        supplier_id: requirement.supplier_id || '',
+        plant: requirement.plant,
+        route: requirement.route || 'SPOT_PO',
+        total_value: requirement.group_value_inr,
+        status: 'approved',
+      },
+      update: {
+        status: 'approved',
+        total_value: requirement.group_value_inr,
+      },
+    });
+
+    // Create POLine rows for all PR lines belonging to this requirement
+    const prLines = await prisma.pRLine.findMany({
+      where: { requirement_id: requirement.id },
+    });
+
+    if (prLines.length > 0) {
+      for (const line of prLines) {
+        const unitPrice = requirement.po_unit_price || line.estimated_unit_price || 0;
+        await prisma.pOLine.create({
+          data: {
+            po_id: poId,
+            requirement_id: requirement.id,
+            item_code: line.resolved_item_code,
+            description: line.description,
+            quantity: line.quantity,
+            uom: line.uom,
+            unit_price: unitPrice,
+            total_price: line.quantity * unitPrice,
+          },
+        });
+      }
+    } else {
+      await prisma.pOLine.create({
         data: {
-          contract_id: contract.contract_id,
-          po_id: requirement.po_id,
-          req_id: requirement.id,
-          amount: requirement.group_value_inr,
+          po_id: poId,
+          requirement_id: requirement.id,
+          item_code: requirement.item_code,
+          description: `Item ${requirement.item_code} for ${requirement.plant}`,
+          quantity: requirement.total_quantity,
+          uom: requirement.uom,
+          unit_price: requirement.po_unit_price || requirement.valuation_price || 0,
+          total_price: requirement.group_value_inr,
         },
       });
     }
+
+    // If CONTRACT_PO, record ledger consumption using the exact contract_id from the decision!
+    if (requirement.route === 'CONTRACT_PO') {
+      const contractId = requirement.contract_id || requirement.valuation_ref;
+      if (contractId) {
+        await prisma.contractConsumption.create({
+          data: {
+            contract_id: contractId,
+            po_id: poId,
+            req_id: requirement.id,
+            amount: requirement.group_value_inr,
+          },
+        });
+        await prisma.contract.updateMany({
+          where: { contract_id: contractId },
+          data: {
+            consumed_value: { increment: requirement.group_value_inr },
+          },
+        });
+      }
+    }
+  } else {
+    // 2. If Sourcing Request, create sourcing_requests row
+    await prisma.sourcingRequest.create({
+      data: {
+        requirement_id: requirement.id,
+        item_code: requirement.item_code,
+        route: requirement.route || 'RFQ',
+        estimated_value: requirement.group_value_inr,
+        suggested_suppliers: requirement.suggested_suppliers || '',
+        status: 'approved',
+      },
+    });
   }
 
   // Update requirement status
@@ -157,7 +249,7 @@ requirementsRouter.post('/requirements/:id/approve', async (req: Request, res: R
     'approve',
     actor,
     role,
-    { status: 'approved', comment }
+    { status: 'approved', comment, route: requirement.route, isPO }
   );
 
   return res.json({ message: 'Requirement approved successfully', requirement: updated });
@@ -176,9 +268,27 @@ requirementsRouter.post('/requirements/:id/override', async (req: Request, res: 
     return res.status(404).json({ error: 'Requirement not found' });
   }
 
+  // STATE GUARDRAIL: Override cannot be performed on already approved and locked requirements
+  if (requirement.status === 'approved') {
+    return res.status(400).json({
+      error: 'STATE GUARDRAIL VIOLATION: Requirement is already approved and locked. Overrides are not permitted.',
+    });
+  }
+
+  // IDENTITY GUARDRAIL: Resolve identity from headers or body and enforce authorized roles
+  const headerRole = req.headers['x-user-role'] as string | undefined;
+  const headerActor = req.headers['x-user-name'] as string | undefined;
+  const actor = headerActor || req.body.actor || 'Buyer Demo';
+  const role = headerRole || req.body.role || 'Buyer';
+
+  const ALLOWED_ROLES = ['Buyer', 'Procurement Head'];
+  if (!ALLOWED_ROLES.includes(role)) {
+    return res.status(403).json({
+      error: `IDENTITY GUARDRAIL: Role "${role}" is not authorized. Requesters cannot override requirements.`,
+    });
+  }
+
   const {
-    actor = 'Buyer Demo',
-    role = 'Buyer',
     comment,
     new_route,
     new_supplier_id,
@@ -193,12 +303,17 @@ requirementsRouter.post('/requirements/:id/override', async (req: Request, res: 
     });
   }
 
-  // GUARDRAIL CHECK: Never allow a Blocked or Inactive supplier
+  // SUPPLIER GUARDRAIL CHECK: Unknown suppliers or Blocked/Inactive suppliers are strictly rejected
   if (new_supplier_id) {
     const supplier = await prisma.supplier.findUnique({
       where: { supplier_id: new_supplier_id },
     });
-    if (supplier && (supplier.status === 'Blocked' || supplier.status === 'Inactive')) {
+    if (!supplier) {
+      return res.status(400).json({
+        error: `GUARDRAIL VIOLATION: Supplier "${new_supplier_id}" does not exist in master data.`,
+      });
+    }
+    if (supplier.status === 'Blocked' || supplier.status === 'Inactive') {
       return res.status(400).json({
         error: `GUARDRAIL VIOLATION: Supplier ${new_supplier_id} is ${supplier.status}. Blocked or Inactive suppliers can NEVER receive an order or be selected.`,
       });
@@ -250,7 +365,7 @@ requirementsRouter.post('/requirements/:id/override', async (req: Request, res: 
     'override',
     actor,
     role,
-    { original: originalSnapshot, updated: { new_route, new_supplier_id, comment } }
+    { comment, new_route, new_supplier_id, new_price, new_value }
   );
 
   return res.json({ message: 'Override applied successfully', requirement: updated });
