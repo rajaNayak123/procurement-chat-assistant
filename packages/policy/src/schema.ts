@@ -113,3 +113,61 @@ export const PolicyDocumentSchema = z.object({
 });
 
 export type ValidatedPolicyDocument = z.infer<typeof PolicyDocumentSchema>;
+
+export const PolicyOperationSchema = z.discriminatedUnion('op', [
+  z.object({
+    op: z.literal('set_param'),
+    param: z.string(),
+    value: z.any(),
+    citation: z.string().optional(),
+  }),
+  z.object({
+    op: z.literal('add_rule'),
+    position: z.union([z.number(), z.literal('start'), z.literal('end')]).optional(),
+    rule: PolicyRuleSchema,
+    citation: z.string().optional(),
+  }),
+  z.object({
+    op: z.literal('update_rule'),
+    rule_id: z.string(),
+    changes: z.record(z.any()),
+    citation: z.string().optional(),
+  }),
+  z.object({
+    op: z.literal('remove_rule'),
+    rule_id: z.string(),
+    citation: z.string().optional(),
+  }),
+  z.object({
+    op: z.literal('disable_rule'),
+    rule_id: z.string(),
+    citation: z.string().optional(),
+  }),
+  z.object({
+    op: z.literal('reorder'),
+    order: z.array(z.string()),
+    citation: z.string().optional(),
+  }),
+]);
+
+export const PolicyChangeSetSchema = z.object({
+  change_set_id: z.string().optional(),
+  policy_id: z.string(),
+  base_version: z.string(),
+  target_version: z.string(),
+  effective_from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Must be YYYY-MM-DD'),
+  is_amendment: z.boolean(),
+  operations: z.array(PolicyOperationSchema).min(1, 'At least one operation is required'),
+  citations: z
+    .array(
+      z.object({
+        operation_index: z.number(),
+        sentence: z.string(),
+      })
+    )
+    .optional()
+    .default([]),
+  assumptions: z.array(z.string()).optional().default([]),
+});
+
+export type ValidatedPolicyChangeSet = z.infer<typeof PolicyChangeSetSchema>;
