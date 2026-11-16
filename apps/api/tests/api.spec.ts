@@ -377,4 +377,147 @@ PR-T3,1,2026-11-04 10:45,Charlie,Safety,CHK1,ITM-1016,VCI Bag,200,NOS,22,2026-11
     expect(linkedReq).toBeDefined();
     expect(linkedReq?.status).toBe('pending');
   });
+
+  it('Policy workflow enforces unique version, assumption confirmation, lint errors, status lifecycle, and file persistence', async () => {
+    // 1. Upload policy file: verify file is stored and recorded in PolicyDocument
+    const uploadRes = await request(app)
+      .post('/api/policy/changes')
+      .attach('file', Buffer.from('Change spot limit to 300000 with effect from 2026-11-01.'), 'sample_policy.txt');
+
+    expect(uploadRes.status).toBe(200);
+    expect(uploadRes.body.document).toBeDefined();
+    expect(uploadRes.body.document.file_name).toBe('sample_policy.txt');
+    expect(uploadRes.body.retroactive_warning).toBeDefined(); // 2026-11-01 is retroactive
+
+    // Verify stored in DB
+    const savedDoc = await prisma.policyDocument.findUnique({
+      where: { id: uploadRes.body.document.id },
+    });
+    expect(savedDoc).toBeDefined();
+
+    const changeSetId = uploadRes.body.change_set_id;
+
+    // 2. Unticked assumptions guardrail:
+    // Update changeSet to have assumptions
+    await prisma.policyChangeSet.update({
+      where: { id: changeSetId },
+      data: {
+        assumptions: JSON.stringify(['Assumption 1: limit applies to all categories', 'Assumption 2: plant Pune included']),
+      },
+    });
+
+    const unconfirmedRes = await request(app)
+      .post(`/api/policy/changes/${changeSetId}/approve`)
+      .send({
+        actor: 'Procurement Head',
+        role: 'Procurement Head',
+        version: '5.2',
+        confirmed_assumptions: ['Assumption 1: limit applies to all categories'], // only 1 of 2 confirmed
+      });
+    expect(unconfirmedRes.status).toBe(400);
+    expect(unconfirmedRes.body.error).toContain('Unticked assumptions');
+
+    // 3. Reused version string guardrail:
+    // Create an existing version first with dynamic version to prevent cross-run collisions
+    const existingVer = `5.9-exist-${Date.now()}`;
+    await prisma.policyVersion.create({
+      data: {
+        policy_id: 'TEST-POL',
+        version: existingVer,
+        effective_from: '2026-04-01',
+        status: 'active',
+        policy_json: JSON.stringify({ policy_id: 'TEST-POL', version: existingVer, effective_from: '2026-04-01', status: 'active', params: {}, rules: [] }),
+      },
+    });
+
+    const duplicateVerRes = await request(app)
+      .post(`/api/policy/changes/${changeSetId}/approve`)
+      .send({
+        actor: 'Procurement Head',
+        role: 'Procurement Head',
+        version: existingVer,
+        all_assumptions_confirmed: true,
+      });
+    expect(duplicateVerRes.status).toBe(400);
+    expect(duplicateVerRes.body.error).toContain(`Version '${existingVer}' already exists`);
+
+    // 4. Lint errors guardrail:
+    // Update operations with contradictory limits: spot_limit 600000 > emergency_limit 500000
+    await prisma.policyChangeSet.update({
+      where: { id: changeSetId },
+      data: {
+        operations: JSON.stringify([
+          { op: 'set_param', param: 'spot_limit', value: 600000 },
+          { op: 'set_param', param: 'emergency_limit', value: 500000 },
+        ]),
+        assumptions: '[]',
+      },
+    });
+
+    const lintFailRes = await request(app)
+      .post(`/api/policy/changes/${changeSetId}/approve`)
+      .send({
+        actor: 'Procurement Head',
+        role: 'Procurement Head',
+        version: `5.3-lint-${Date.now()}`,
+      });
+    expect(lintFailRes.status).toBe(400);
+    expect(lintFailRes.body.error).toContain('Approval blocked: candidate policy has lint errors');
+
+    // 5. Future effective date -> status 'scheduled'
+    const futureDate = '2027-01-01';
+    const schedVer = `5.3-sched-${Date.now()}`;
+    await prisma.policyChangeSet.update({
+      where: { id: changeSetId },
+      data: {
+        effective_from: futureDate,
+        operations: JSON.stringify([{ op: 'set_param', param: 'spot_limit', value: 250000 }]),
+      },
+    });
+
+    const scheduledRes = await request(app)
+      .post(`/api/policy/changes/${changeSetId}/approve`)
+      .send({
+        actor: 'Procurement Head',
+        role: 'Procurement Head',
+        version: schedVer,
+        effective_from: futureDate,
+      });
+    expect(scheduledRes.status).toBe(200);
+    expect(scheduledRes.body.status).toBe('scheduled');
+
+    // 6. Past/Today effective date -> status 'active', supersedes older active versions
+    const pastDate = '2026-11-01';
+    const activeVer = `5.4-act-${Date.now()}`;
+    const activeChangeSet = await prisma.policyChangeSet.create({
+      data: {
+        policy_id: 'CORVO-PROC-POL-04',
+        base_version: '5.0',
+        target_version: activeVer,
+        effective_from: pastDate,
+        is_amendment: true,
+        operations: JSON.stringify([{ op: 'set_param', param: 'spot_limit', value: 280000 }]),
+        citations: '[]',
+        assumptions: '[]',
+        status: 'pending_approval',
+      },
+    });
+
+    const activeRes = await request(app)
+      .post(`/api/policy/changes/${activeChangeSet.id}/approve`)
+      .send({
+        actor: 'Procurement Head',
+        role: 'Procurement Head',
+        version: activeVer,
+        effective_from: pastDate,
+      });
+    expect(activeRes.status).toBe(200);
+    expect(activeRes.body.status).toBe('active');
+
+    // Verify older active version with effective_from <= pastDate was superseded
+    const olderActive = await prisma.policyVersion.findUnique({
+      where: { version: existingVer },
+    });
+    expect(olderActive?.status).toBe('superseded');
+  });
 });
