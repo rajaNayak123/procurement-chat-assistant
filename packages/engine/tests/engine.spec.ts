@@ -310,4 +310,106 @@ describe('Unit Tests: Engine Clauses and Components', () => {
     expect(res.outputRows[2].decision).toBe('');
     expect(res.outputRows[2].reason).toContain('Invalid plant');
   });
+
+  it('Clause 6.1-6.4: Supplier eligibility thresholds filter suppliers and list them under excluded', () => {
+    const strictPolicy = JSON.parse(JSON.stringify(DEFAULT_POLICY_V5));
+    strictPolicy.params.ranking.min_on_time_pct = 95; // Require 95% on-time
+    strictPolicy.params.ranking.min_quality = 4.5;    // Require 4.5 quality
+
+    const result = computePreferredSuppliers(
+      'SYN-ITM-01',
+      '2026-11-15',
+      SYNTHETIC_SUPPLIERS,
+      SYNTHETIC_PO_HISTORY,
+      SYNTHETIC_CONTRACTS,
+      SYNTHETIC_CONTRACT_LINES,
+      strictPolicy
+    );
+
+    // In SYNTHETIC_SUPPLIERS:
+    // SYN-SUP-102 is 88% on-time (below 95%) and 4.2 quality (below 4.5) -> must be excluded!
+    const excludedS102 = result.excluded.find((e) => e.supplier.supplier_id === 'SYN-SUP-102');
+    expect(excludedS102).toBeDefined();
+    expect(excludedS102?.reason).toMatch(/below required minimum/);
+    expect(result.preferred.some((p) => p.supplier_id === 'SYN-SUP-102')).toBe(false);
+
+    // Top-up suggestions also respect the strict threshold
+    const topupSuggestions = getSourcingSuggestions(
+      SYNTHETIC_ITEMS[0],
+      result.preferred,
+      SYNTHETIC_SUPPLIERS,
+      3,
+      strictPolicy
+    );
+    expect(topupSuggestions).not.toContain('SYN-SUP-102');
+  });
+
+  it('Clubbing and consolidation evaluate version in force per line and anchor requirement regardless of policy array order', () => {
+    const policyV5 = JSON.parse(JSON.stringify(DEFAULT_POLICY_V5));
+    policyV5.version = '5.0';
+    policyV5.effective_from = '2026-04-01';
+    policyV5.params.club_created_within_days = 14;
+    policyV5.params.consolidation_window_hours = 24;
+
+    const policyV51 = JSON.parse(JSON.stringify(DEFAULT_POLICY_V5));
+    policyV51.version = '5.1';
+    policyV51.effective_from = '2026-11-10';
+    policyV51.params.club_created_within_days = 5; // Tighter window after Nov 10
+    policyV51.params.consolidation_window_hours = 48;
+
+    const testBatch: PRLineInput[] = [
+      {
+        pr_no: 'PR-ORD-01',
+        pr_line: 1,
+        created_at: '2026-11-01 10:00',
+        requester: 'Alice',
+        department: 'Mech',
+        plant: 'SYN-P1',
+        item_code: 'SYN-ITM-01',
+        description: 'Ball bearing 6308-ZZ',
+        quantity: 10,
+        uom: 'NOS',
+        need_by_date: '2026-11-15',
+        urgency: 'Normal',
+      },
+      {
+        pr_no: 'PR-ORD-02',
+        pr_line: 1,
+        created_at: '2026-11-08 10:00', // 7 days apart (clubs under v5.0's 14d, but >5d)
+        requester: 'Bob',
+        department: 'Mech',
+        plant: 'SYN-P1',
+        item_code: 'SYN-ITM-01',
+        description: 'Ball bearing 6308-ZZ',
+        quantity: 15,
+        uom: 'NOS',
+        need_by_date: '2026-11-16',
+        urgency: 'Normal',
+      },
+    ];
+
+    // Run with [v5.0, v5.1]
+    const ctxForward: EngineContext = {
+      plants: SYNTHETIC_PLANTS,
+      items: SYNTHETIC_ITEMS,
+      suppliers: SYNTHETIC_SUPPLIERS,
+      po_history: SYNTHETIC_PO_HISTORY,
+      contracts: SYNTHETIC_CONTRACTS,
+      contract_lines: SYNTHETIC_CONTRACT_LINES,
+      policy_versions: [policyV5, policyV51],
+    };
+    const resForward = runDecisionEngine(testBatch, ctxForward);
+
+    // Run with [v5.1, v5.0] (reverse DB order)
+    const ctxReverse: EngineContext = {
+      ...ctxForward,
+      policy_versions: [policyV51, policyV5],
+    };
+    const resReverse = runDecisionEngine(testBatch, ctxReverse);
+
+    // Both must club lines on 2026-11-08 under v5.0 (since Nov 8 < Nov 10 effective date)
+    expect(resForward.requirements.length).toBe(resReverse.requirements.length);
+    expect(resForward.outputRows[0].group_id).toBe(resReverse.outputRows[0].group_id);
+    expect(resForward.outputRows[1].group_id).toBe(resReverse.outputRows[1].group_id);
+  });
 });
