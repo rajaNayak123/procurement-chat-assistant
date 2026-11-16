@@ -286,3 +286,12 @@ Format: **Noticed / Decided / Why / Where in code / Effect**.
 * **Why**: Reproduces worked examples 3, 9, 10, 11, 12, and PO supplier selections 2, 5, 6, 7, 8.
 * **Where in code**: `packages/engine/src/ranking.ts`.
 * **Effect**: Accurate, transparent preferred supplier lists.
+
+---
+
+### Decision 31: Supplier Eligibility Thresholds and Top-Up Filtering
+* **Noticed**: Policy parameters include `min_on_time_pct`, `min_quality`, and `excluded_supplier_statuses`. It is ambiguous whether sourcing top-up candidates must meet the same eligibility thresholds as preferred ranking candidates.
+* **Decided**: Enforce `excluded_supplier_statuses` (defaulting to Blocked and Inactive), `min_on_time_pct`, and `min_quality` before scoring candidate suppliers, placing failing suppliers under the `excluded` list with explanatory reasons. Crucially, apply the exact same eligibility filters to category top-up candidates in `getSourcingSuggestions`.
+* **Why**: An ineligible vendor (e.g. failing minimum quality 4.0 or minimum on-time 90%) must not bypass policy restrictions simply because they were added as a category top-up rather than via preferred PO history.
+* **Where in code**: `packages/engine/src/ranking.ts` (`computePreferredSuppliers` and `getSourcingSuggestions`).
+* **Effect**: Disqualified suppliers are systematically excluded from both preferred PO placement and RFQ/RFP sourcing suggestions.
