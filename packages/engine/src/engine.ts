@@ -36,38 +36,19 @@ export interface EngineExecutionResult {
   };
 }
 
-export function selectPolicyVersionForDate(
-  requirementDate: string,
-  policies: PolicyDocument[],
-  forcedVersion?: string
-): PolicyDocument {
-  if (forcedVersion) {
-    const forced = policies.find((p) => p.version === forcedVersion);
-    if (forced) return forced;
-  }
-
-  // Filter policies where effective_from <= requirementDate
-  const eligible = policies.filter((p) => {
-    const diff = getCalendarDaysDiff(requirementDate, p.effective_from);
-    return diff >= 0;
-  });
-
-  if (eligible.length === 0) {
-    return policies[0] || DEFAULT_POLICY_V5;
-  }
-
-  // Pick the policy with the latest effective_from
-  eligible.sort((a, b) => getCalendarDaysDiff(b.effective_from, a.effective_from));
-  return eligible[0];
-}
+export { selectPolicyVersionForDate } from './utils/policySelector.js';
+import { selectPolicyVersionForDate } from './utils/policySelector.js';
 
 export function runDecisionEngine(
   inputLines: PRLineInput[],
   context: EngineContext
 ): EngineExecutionResult {
-  const policies = context.policy_versions && context.policy_versions.length > 0
-    ? context.policy_versions
-    : [DEFAULT_POLICY_V5];
+  // Strictly sort policy versions by effective_from descending so array order never alters results
+  const policies = (
+    context.policy_versions && context.policy_versions.length > 0
+      ? [...context.policy_versions]
+      : [DEFAULT_POLICY_V5]
+  ).sort((a, b) => getCalendarDaysDiff(b.effective_from, a.effective_from));
 
   const itemMap = new Map<string, ItemMaster>(
     context.items.map((i) => [i.item_code.toUpperCase(), i])
@@ -87,13 +68,14 @@ export function runDecisionEngine(
     notProcessedMap.set(`${np.pr_no}:${np.pr_line}`, np);
   }
 
-  // 2. Clubbing
-  // Use params from default policy for clubbing windows
-  const basePolicy = policies[0] || DEFAULT_POLICY_V5;
-  const clubDays = basePolicy.params.club_created_within_days ?? 14;
-  const needByDays = basePolicy.params.club_need_by_within_days ?? 7;
-
-  let requirements = clubPRLines(validLines, context.items, clubDays, needByDays);
+  // 2. Clubbing: use the version in force at each line's date
+  let requirements = clubPRLines(
+    validLines,
+    context.items,
+    policies,
+    7,
+    context.force_policy_version
+  );
 
   // 3. Sort requirements chronologically for simulated contract ceiling consumption
   requirements.sort((a, b) => {
@@ -233,9 +215,12 @@ export function runDecisionEngine(
     }
   }
 
-  // 6. PO Consolidation
-  const consolHours = basePolicy.params.consolidation_window_hours ?? 24;
-  const { consolidatedPOs, updatedRequirements } = consolidatePOs(requirements, consolHours);
+  // 6. PO Consolidation: each open PO window is determined by its anchor requirement's policy version
+  const { consolidatedPOs, updatedRequirements } = consolidatePOs(
+    requirements,
+    policies,
+    context.force_policy_version
+  );
   requirements = updatedRequirements;
 
   // 7. INVARIANT CHECK: Blocked or Inactive suppliers must NEVER receive a PO or be suggested
