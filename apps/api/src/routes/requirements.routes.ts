@@ -25,8 +25,11 @@ requirementsRouter.get('/requirements', async (req: Request, res: Response) => {
 
 // GET /api/requirements/:id
 requirementsRouter.get('/requirements/:id', async (req: Request, res: Response) => {
-  const requirement = await prisma.requirement.findUnique({
-    where: { id: req.params.id },
+  const requirement = await prisma.requirement.findFirst({
+    where: {
+      OR: [{ id: req.params.id }, { group_id: req.params.id }],
+    },
+    orderBy: { created_at: 'desc' },
   });
 
   if (!requirement) {
@@ -35,7 +38,12 @@ requirementsRouter.get('/requirements/:id', async (req: Request, res: Response) 
 
   // Fetch PR lines forming this requirement
   const prLines = await prisma.pRLine.findMany({
-    where: { requirement_id: req.params.id },
+    where: {
+      OR: [
+        { requirement_id: requirement.id },
+        { requirement_id: requirement.group_id || '' },
+      ],
+    },
   });
 
   // Fetch candidate contracts and preferred suppliers for explainability
@@ -85,8 +93,11 @@ requirementsRouter.get('/requirements/:id', async (req: Request, res: Response) 
 
 // POST /api/requirements/:id/approve
 requirementsRouter.post('/requirements/:id/approve', async (req: Request, res: Response) => {
-  const requirement = await prisma.requirement.findUnique({
-    where: { id: req.params.id },
+  const requirement = await prisma.requirement.findFirst({
+    where: {
+      OR: [{ id: req.params.id }, { group_id: req.params.id }],
+    },
+    orderBy: { created_at: 'desc' },
   });
 
   if (!requirement) {
@@ -125,7 +136,7 @@ requirementsRouter.post('/requirements/:id/approve', async (req: Request, res: R
 
   // Update requirement status
   const updated = await prisma.requirement.update({
-    where: { id: req.params.id },
+    where: { id: requirement.id },
     data: {
       status: 'approved',
       approved_by: actor,
@@ -148,8 +159,11 @@ requirementsRouter.post('/requirements/:id/approve', async (req: Request, res: R
 
 // POST /api/requirements/:id/override
 requirementsRouter.post('/requirements/:id/override', async (req: Request, res: Response) => {
-  const requirement = await prisma.requirement.findUnique({
-    where: { id: req.params.id },
+  const requirement = await prisma.requirement.findFirst({
+    where: {
+      OR: [{ id: req.params.id }, { group_id: req.params.id }],
+    },
+    orderBy: { created_at: 'desc' },
   });
 
   if (!requirement) {
@@ -212,7 +226,7 @@ requirementsRouter.post('/requirements/:id/override', async (req: Request, res: 
 
   // Update requirement with override
   const updated = await prisma.requirement.update({
-    where: { id: req.params.id },
+    where: { id: requirement.id },
     data: {
       route: new_route || requirement.route,
       supplier_id: new_supplier_id || requirement.supplier_id,
