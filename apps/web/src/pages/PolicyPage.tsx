@@ -4,14 +4,14 @@ import { useCurrentUser } from '../context/UserContext.js';
 import {
   ScrollText,
   UploadCloud,
-  MessageSquare,
   CheckCircle2,
   AlertTriangle,
   FileCode,
-  Scale,
   Sparkles,
   ArrowRight,
   ShieldCheck,
+  Sliders,
+  FileText,
 } from 'lucide-react';
 
 export const PolicyPage: React.FC = () => {
@@ -20,10 +20,27 @@ export const PolicyPage: React.FC = () => {
   const [readableRules, setReadableRules] = useState<string[]>([]);
   const [showJson, setShowJson] = useState(false);
 
-  // Amendment Input
+  // Mode: 'text' (NLP / doc upload) or 'form' (Structured Form Editor)
+  const [editorMode, setEditorMode] = useState<'text' | 'form'>('text');
+  const [formNotice, setFormNotice] = useState<string | null>(null);
+
+  // Amendment Input (NLP / doc)
   const [inputText, setInputText] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
+
+  // Structured Form Editor Fields
+  const [formTargetVersion, setFormTargetVersion] = useState('5.1');
+  const [formEffectiveFrom, setFormEffectiveFrom] = useState('2026-11-25');
+  const [formSpotLimit, setFormSpotLimit] = useState<string>('');
+  const [formEmergencyLimit, setFormEmergencyLimit] = useState<string>('');
+  const [formClubbingDays, setFormClubbingDays] = useState<string>('');
+  const [formConsolidationHours, setFormConsolidationHours] = useState<string>('');
+  const [formMinOnTime, setFormMinOnTime] = useState<string>('');
+  const [formWithdrawRuleId, setFormWithdrawRuleId] = useState<string>('');
+  const [formNewCategory, setFormNewCategory] = useState<string>('');
+  const [formNewPlant, setFormNewPlant] = useState<string>('');
+  const [formNewSpotLimit, setFormNewSpotLimit] = useState<string>('');
 
   // Extracted Review State
   const [extractedReview, setExtractedReview] = useState<any | null>(null);
@@ -54,6 +71,7 @@ export const PolicyPage: React.FC = () => {
 
     setLoading(true);
     setSuccessMessage(null);
+    setFormNotice(null);
 
     try {
       let res;
@@ -69,7 +87,119 @@ export const PolicyPage: React.FC = () => {
       setTargetVersion(res.changeSet.target_version);
       setEffectiveDate(res.changeSet.effective_from);
     } catch (err: any) {
-      alert(`Extraction failed: ${err.message}`);
+      if (err.needs_form_editor) {
+        setEditorMode('form');
+        setFormNotice('No operations could be automatically extracted from your input. Please configure your changes in the Structured Form Editor below.');
+      } else {
+        alert(`Extraction failed: ${err.message}`);
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSubmitStructuredForm = async () => {
+    setLoading(true);
+    setSuccessMessage(null);
+    setFormNotice(null);
+
+    const operations: any[] = [];
+    if (formSpotLimit) {
+      operations.push({
+        op: 'set_param',
+        param: 'spot_limit',
+        value: parseFloat(formSpotLimit),
+        citation: `Form: Set spot limit to Rs ${formSpotLimit}`,
+      });
+    }
+    if (formEmergencyLimit) {
+      operations.push({
+        op: 'set_param',
+        param: 'emergency_limit',
+        value: parseFloat(formEmergencyLimit),
+        citation: `Form: Set emergency limit to Rs ${formEmergencyLimit}`,
+      });
+    }
+    if (formClubbingDays) {
+      operations.push({
+        op: 'set_param',
+        param: 'club_created_within_days',
+        value: parseInt(formClubbingDays, 10),
+        citation: `Form: Set clubbing window to ${formClubbingDays} days`,
+      });
+    }
+    if (formConsolidationHours) {
+      operations.push({
+        op: 'set_param',
+        param: 'consolidation_window_hours',
+        value: parseInt(formConsolidationHours, 10),
+        citation: `Form: Set consolidation window to ${formConsolidationHours} hours`,
+      });
+    }
+    if (formMinOnTime) {
+      operations.push({
+        op: 'set_param',
+        param: 'ranking.min_on_time_pct',
+        value: parseInt(formMinOnTime, 10),
+        citation: `Form: Set minimum on-time threshold to ${formMinOnTime}%`,
+      });
+    }
+    if (formWithdrawRuleId) {
+      operations.push({
+        op: 'disable_rule',
+        rule_id: formWithdrawRuleId,
+        citation: `Form: Withdrew rule ${formWithdrawRuleId}`,
+      });
+    }
+    if (formNewCategory && formNewSpotLimit) {
+      const plant = formNewPlant ? formNewPlant.toUpperCase() : undefined;
+      const limit = parseFloat(formNewSpotLimit);
+      const ruleId = plant ? `5.3b-${plant.toLowerCase()}` : `5.4-${formNewCategory.toLowerCase().replace(/\s+/g, '_')}`;
+      const whenAll: any[] = [
+        { field: 'item.category', op: 'eq', value: formNewCategory },
+        { field: 'req.value', op: 'lte', value: limit },
+        { field: 'history.bought_from_active', args: { days: 365 }, op: 'eq', value: true },
+      ];
+      if (plant) {
+        whenAll.unshift({ field: 'plant', op: 'eq', value: plant });
+      }
+      operations.push({
+        op: 'add_rule',
+        position: 3,
+        rule: {
+          id: ruleId,
+          name: `Spot_${formNewCategory}${plant ? '_' + plant : ''}`,
+          enabled: true,
+          when: { all: whenAll },
+          then: {
+            decision: 'PO',
+            route: 'SPOT_PO',
+            supplier: 'preferred_1',
+            price: 'reference_price',
+          },
+        },
+        citation: `Form: Added spot rule for ${formNewCategory}${plant ? ' at ' + plant : ''} up to ${limit}`,
+      });
+    }
+
+    if (operations.length === 0) {
+      alert('Please fill at least one parameter or rule change in the form.');
+      setLoading(false);
+      return;
+    }
+
+    try {
+      const res = await api.submitFormPolicyChange({
+        target_version: formTargetVersion || '5.1',
+        effective_from: formEffectiveFrom || '2026-11-25',
+        operations,
+      });
+
+      setExtractedReview(res);
+      setTargetVersion(res.changeSet.target_version);
+      setEffectiveDate(res.changeSet.effective_from);
+    } catch (err: any) {
+      alert(`Structured form failed: ${err.message}`);
     } finally {
       setLoading(false);
     }
@@ -106,7 +236,7 @@ export const PolicyPage: React.FC = () => {
       <div className="pb-4 border-b border-slate-200">
         <h1 className="text-xl font-bold text-slate-900 tracking-tight">Policy as Data Governance</h1>
         <p className="text-xs text-slate-500 mt-1">
-          Zero-code versioned procurement rules. Upload amendment documents or describe changes in plain English.
+          Zero-code versioned procurement rules. Upload amendment documents, describe changes in plain English, or use the structured form editor.
         </p>
       </div>
 
@@ -184,64 +314,253 @@ export const PolicyPage: React.FC = () => {
         </div>
       )}
 
-      {/* Upload or Describe Amendment */}
+      {/* Editor Tabs & Authoring Box */}
       <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 space-y-4">
-        <h2 className="text-sm font-bold text-slate-900 flex items-center space-x-2">
-          <Sparkles className="w-4 h-4 text-sky-600" />
-          <span>Upload Amendment or Describe Policy Change</span>
-        </h2>
+        <div className="flex items-center justify-between pb-3 border-b border-slate-200">
+          <div className="flex items-center space-x-2">
+            <Sparkles className="w-4 h-4 text-sky-600" />
+            <span className="text-sm font-bold text-slate-900">Author Policy Amendment</span>
+          </div>
+          <div className="flex space-x-1 bg-slate-100 p-1 rounded-lg text-xs font-semibold">
+            <button
+              onClick={() => {
+                setEditorMode('text');
+                setFormNotice(null);
+              }}
+              className={`px-3 py-1.5 rounded-md flex items-center space-x-1.5 transition-all ${
+                editorMode === 'text'
+                  ? 'bg-white text-sky-700 shadow-sm'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <FileText className="w-3.5 h-3.5" />
+              <span>Natural Language / Upload</span>
+            </button>
+            <button
+              onClick={() => {
+                setEditorMode('form');
+                setFormNotice(null);
+              }}
+              className={`px-3 py-1.5 rounded-md flex items-center space-x-1.5 transition-all ${
+                editorMode === 'form'
+                  ? 'bg-white text-sky-700 shadow-sm'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <Sliders className="w-3.5 h-3.5" />
+              <span>Structured Form Editor</span>
+            </button>
+          </div>
+        </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          {/* File Upload */}
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">
-              Upload Policy / Amendment Document (PDF, DOCX, TXT, MD)
-            </label>
-            <div className="border-2 border-dashed border-slate-300 rounded-lg p-5 text-center bg-slate-50/50">
-              <input
-                type="file"
-                accept=".pdf,.docx,.txt,.md"
-                onChange={(e) => {
-                  if (e.target.files && e.target.files[0]) setFile(e.target.files[0]);
-                }}
-                className="hidden"
-                id="policy-file-input"
-              />
-              <label htmlFor="policy-file-input" className="cursor-pointer block">
-                <UploadCloud className="w-8 h-8 text-slate-400 mx-auto mb-1" />
-                <span className="text-xs font-semibold text-slate-700">
-                  {file ? file.name : 'Choose file or drag & drop'}
-                </span>
-              </label>
+        {formNotice && (
+          <div className="p-3 bg-amber-50 border border-amber-300 rounded-lg text-xs text-amber-900 flex items-center space-x-2">
+            <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>{formNotice}</span>
+          </div>
+        )}
+
+        {editorMode === 'text' ? (
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {/* File Upload */}
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Upload Policy / Amendment Document (PDF, DOCX, TXT, MD)
+                </label>
+                <div className="border-2 border-dashed border-slate-300 rounded-lg p-5 text-center bg-slate-50/50">
+                  <input
+                    type="file"
+                    accept=".pdf,.docx,.txt,.md"
+                    onChange={(e) => {
+                      if (e.target.files && e.target.files[0]) setFile(e.target.files[0]);
+                    }}
+                    className="hidden"
+                    id="policy-file-input"
+                  />
+                  <label htmlFor="policy-file-input" className="cursor-pointer block">
+                    <UploadCloud className="w-8 h-8 text-slate-400 mx-auto mb-1" />
+                    <span className="text-xs font-semibold text-slate-700">
+                      {file ? file.name : 'Choose file or drag & drop'}
+                    </span>
+                  </label>
+                </div>
+              </div>
+
+              {/* Natural language text box */}
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Or Describe Change in Formal Sentences
+                </label>
+                <textarea
+                  rows={4}
+                  value={inputText}
+                  onChange={(e) => setInputText(e.target.value)}
+                  placeholder="e.g. 'The spot limit is raised from Rs 2,00,000 to Rs 3,00,000 with effect from 25 November 2026. Rule 5.3 is withdrawn.'..."
+                  className="w-full bg-slate-50 border border-slate-300 rounded-lg p-2.5 text-xs focus:ring-1 focus:ring-sky-500 focus:outline-none"
+                />
+              </div>
+            </div>
+
+            <div className="pt-2 flex justify-end">
+              <button
+                disabled={loading || (!file && !inputText.trim())}
+                onClick={handleExtractAmendment}
+                className="px-5 py-2.5 bg-sky-600 hover:bg-sky-700 disabled:bg-slate-200 disabled:text-slate-400 text-white rounded-lg text-xs font-bold shadow-sm transition-all flex items-center space-x-2"
+              >
+                <Sparkles className="w-4 h-4" />
+                <span>{loading ? 'Extracting Change Set...' : 'Extract Changes & Preview Impact'}</span>
+              </button>
             </div>
           </div>
+        ) : (
+          /* Structured Form Editor */
+          <div className="space-y-4">
+            <div className="p-4 bg-sky-50/50 border border-sky-100 rounded-lg space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Target Version</label>
+                  <input
+                    type="text"
+                    value={formTargetVersion}
+                    onChange={(e) => setFormTargetVersion(e.target.value)}
+                    placeholder="5.1"
+                    className="w-full bg-white border border-slate-300 rounded p-2 text-xs font-mono focus:ring-1 focus:ring-sky-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Effective Date</label>
+                  <input
+                    type="date"
+                    value={formEffectiveFrom}
+                    onChange={(e) => setFormEffectiveFrom(e.target.value)}
+                    className="w-full bg-white border border-slate-300 rounded p-2 text-xs focus:ring-1 focus:ring-sky-500"
+                  />
+                </div>
+              </div>
 
-          {/* Natural language text box */}
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">
-              Or Describe Change in Plain English
-            </label>
-            <textarea
-              rows={4}
-              value={inputText}
-              onChange={(e) => setInputText(e.target.value)}
-              placeholder="e.g. 'Raise the spot limit for Packaging to 3 lakh from 25 Nov' or 'At CHK1, Lubricants below 3 lakh may be bought spot'..."
-              className="w-full bg-slate-50 border border-slate-300 rounded-lg p-2.5 text-xs focus:ring-1 focus:ring-sky-500 focus:outline-none"
-            />
+              {/* Parameter Adjustments */}
+              <div className="border-t border-slate-200 pt-3">
+                <span className="text-[11px] font-bold text-slate-600 uppercase tracking-wider block mb-2">
+                  Parameter Adjustments
+                </span>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+                  <div>
+                    <label className="block text-slate-600 mb-0.5">Spot Limit (INR)</label>
+                    <input
+                      type="number"
+                      value={formSpotLimit}
+                      onChange={(e) => setFormSpotLimit(e.target.value)}
+                      placeholder={`Current: ${activePolicy?.params?.spot_limit || 200000}`}
+                      className="w-full bg-white border border-slate-300 rounded p-1.5 text-xs font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-600 mb-0.5">Emergency Limit (INR)</label>
+                    <input
+                      type="number"
+                      value={formEmergencyLimit}
+                      onChange={(e) => setFormEmergencyLimit(e.target.value)}
+                      placeholder={`Current: ${activePolicy?.params?.emergency_limit || 500000}`}
+                      className="w-full bg-white border border-slate-300 rounded p-1.5 text-xs font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-600 mb-0.5">Clubbing Window (Days)</label>
+                    <input
+                      type="number"
+                      value={formClubbingDays}
+                      onChange={(e) => setFormClubbingDays(e.target.value)}
+                      placeholder={`Current: ${activePolicy?.params?.club_created_within_days || 14}`}
+                      className="w-full bg-white border border-slate-300 rounded p-1.5 text-xs font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-600 mb-0.5">Consolidation Window (Hours)</label>
+                    <input
+                      type="number"
+                      value={formConsolidationHours}
+                      onChange={(e) => setFormConsolidationHours(e.target.value)}
+                      placeholder={`Current: ${activePolicy?.params?.consolidation_window_hours || 24}`}
+                      className="w-full bg-white border border-slate-300 rounded p-1.5 text-xs font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-600 mb-0.5">Minimum On-Time (%)</label>
+                    <input
+                      type="number"
+                      value={formMinOnTime}
+                      onChange={(e) => setFormMinOnTime(e.target.value)}
+                      placeholder={`Current: ${activePolicy?.params?.ranking?.min_on_time_pct || 'None'}`}
+                      className="w-full bg-white border border-slate-300 rounded p-1.5 text-xs font-mono"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Rule Management */}
+              <div className="border-t border-slate-200 pt-3 space-y-3">
+                <span className="text-[11px] font-bold text-slate-600 uppercase tracking-wider block">
+                  Rule Actions
+                </span>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+                  <div>
+                    <label className="block font-medium text-slate-700 mb-1">Withdraw / Disable Rule</label>
+                    <select
+                      value={formWithdrawRuleId}
+                      onChange={(e) => setFormWithdrawRuleId(e.target.value)}
+                      className="w-full bg-white border border-slate-300 rounded p-1.5 text-xs"
+                    >
+                      <option value="">-- None --</option>
+                      {activePolicy?.rules?.map((r: any) => (
+                        <option key={r.id} value={r.id}>
+                          Rule {r.id}: {r.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block font-medium text-slate-700 mb-1">Add Specialized Spot Rule</label>
+                    <div className="grid grid-cols-3 gap-2">
+                      <input
+                        type="text"
+                        placeholder="Plant (e.g. CHK1)"
+                        value={formNewPlant}
+                        onChange={(e) => setFormNewPlant(e.target.value)}
+                        className="bg-white border border-slate-300 rounded p-1 text-[11px]"
+                      />
+                      <input
+                        type="text"
+                        placeholder="Category (e.g. Packaging)"
+                        value={formNewCategory}
+                        onChange={(e) => setFormNewCategory(e.target.value)}
+                        className="bg-white border border-slate-300 rounded p-1 text-[11px]"
+                      />
+                      <input
+                        type="number"
+                        placeholder="Limit (INR)"
+                        value={formNewSpotLimit}
+                        onChange={(e) => setFormNewSpotLimit(e.target.value)}
+                        className="bg-white border border-slate-300 rounded p-1 text-[11px] font-mono"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="pt-2 flex justify-end">
+              <button
+                disabled={loading}
+                onClick={handleSubmitStructuredForm}
+                className="px-5 py-2.5 bg-sky-600 hover:bg-sky-700 disabled:bg-slate-200 text-white rounded-lg text-xs font-bold shadow-sm transition-all flex items-center space-x-2"
+              >
+                <Sliders className="w-4 h-4" />
+                <span>{loading ? 'Processing Form...' : 'Generate Change Set & Preview Impact'}</span>
+              </button>
+            </div>
           </div>
-        </div>
-
-        {/* Primary Action Button */}
-        <div className="pt-2 flex justify-end">
-          <button
-            disabled={loading || (!file && !inputText.trim())}
-            onClick={handleExtractAmendment}
-            className="px-5 py-2.5 bg-sky-600 hover:bg-sky-700 disabled:bg-slate-200 disabled:text-slate-400 text-white rounded-lg text-xs font-bold shadow-sm transition-all flex items-center space-x-2"
-          >
-            <Sparkles className="w-4 h-4" />
-            <span>{loading ? 'Extracting Change Set...' : 'Extract Changes & Preview Impact'}</span>
-          </button>
-        </div>
+        )}
       </div>
 
       {/* Review Screen (Diff, Citations, Assumptions, Impact Preview) */}
