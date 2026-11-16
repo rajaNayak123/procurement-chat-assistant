@@ -1,11 +1,14 @@
 import { ResolvedPRLine, Requirement, ItemMaster } from './types.js';
 import { getCalendarDaysDiff, parseDateFlexible } from './utils/dates.js';
+import { PolicyDocument } from '@cantill/policy';
+import { selectPolicyVersionForDate } from './utils/policySelector.js';
 
 export function clubPRLines(
   lines: ResolvedPRLine[],
   items: ItemMaster[],
-  clubCreatedDays: number = 14,
-  clubNeedByDays: number = 7
+  policiesOrClubDays: PolicyDocument[] | number = 14,
+  clubNeedByDaysDefault: number = 7,
+  forcedVersion?: string
 ): Requirement[] {
   const itemMap = new Map(items.map((i) => [i.item_code.toUpperCase(), i]));
 
@@ -22,6 +25,22 @@ export function clubPRLines(
   let reqCounter = 1;
 
   for (const line of sorted) {
+    // Resolve clubbing window in force at line's calendar creation date
+    let clubCreatedDays = 14;
+    let clubNeedByDays = 7;
+    if (Array.isArray(policiesOrClubDays)) {
+      const linePolicy = selectPolicyVersionForDate(
+        line.calendar_created_date,
+        policiesOrClubDays,
+        forcedVersion
+      );
+      clubCreatedDays = linePolicy.params.club_created_within_days ?? 14;
+      clubNeedByDays = linePolicy.params.club_need_by_within_days ?? 7;
+    } else {
+      clubCreatedDays = policiesOrClubDays;
+      clubNeedByDays = clubNeedByDaysDefault;
+    }
+
     // Rule: NEW items are NEVER clubbed (even identical descriptions)
     if (line.is_new) {
       const reqId = `REQ-${String(reqCounter++).padStart(4, '0')}`;
