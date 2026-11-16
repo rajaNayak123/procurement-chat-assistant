@@ -27,10 +27,16 @@ export const FIELD_REGISTRY: Record<string, FieldResolver> = {
 
   'history.bought_from_active': (ctx, args) => {
     const days = args?.days ?? 365;
-    if (days === 365) return ctx.history.bought_from_active_365;
+    if (ctx.history.bought_from_active_fn) {
+      return ctx.history.bought_from_active_fn(days);
+    }
     return ctx.history.bought_from_active_365;
   },
   'history.po_count': (ctx, args) => {
+    const days = args?.days ?? 365;
+    if (ctx.history.po_count_fn) {
+      return ctx.history.po_count_fn(days);
+    }
     return ctx.history.po_count_365;
   },
   'history.last_po_age_days': (ctx) => ctx.history.last_po_age_days,
