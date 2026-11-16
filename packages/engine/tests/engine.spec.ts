@@ -412,4 +412,198 @@ describe('Unit Tests: Engine Clauses and Components', () => {
     expect(resForward.outputRows[0].group_id).toBe(resReverse.outputRows[0].group_id);
     expect(resForward.outputRows[1].group_id).toBe(resReverse.outputRows[1].group_id);
   });
+
+  it('PO consolidation does not truncate hours: 24h30m exceeds window and creates separate PO', () => {
+    const dummyReqs: any[] = [
+      {
+        group_id: 'REQ-0001',
+        requirement_date: '2026-11-01',
+        earliest_created_at: '2026-11-01T08:00:00Z',
+        plant: 'SYN-P1',
+        group_value_inr: 10000,
+        decision: {
+          decision: 'PO',
+          route: 'SPOT_PO',
+          supplier_id: 'SYN-SUP-101',
+        },
+      },
+      {
+        group_id: 'REQ-0002',
+        requirement_date: '2026-11-02',
+        // Exactly 24 hours and 30 minutes after REQ-0001 (diff = 24.5 hrs)
+        earliest_created_at: '2026-11-02T08:30:00Z',
+        plant: 'SYN-P1',
+        group_value_inr: 20000,
+        decision: {
+          decision: 'PO',
+          route: 'SPOT_PO',
+          supplier_id: 'SYN-SUP-101',
+        },
+      },
+      {
+        group_id: 'REQ-0003',
+        requirement_date: '2026-11-02',
+        // 23 hours and 59 minutes after REQ-0001 (diff < 24 hrs)
+        earliest_created_at: '2026-11-02T07:59:00Z',
+        plant: 'SYN-P1',
+        group_value_inr: 15000,
+        decision: {
+          decision: 'PO',
+          route: 'SPOT_PO',
+          supplier_id: 'SYN-SUP-101',
+        },
+      },
+    ];
+
+    const { consolidatedPOs, updatedRequirements } = consolidatePOs(dummyReqs, 24);
+    // REQ-0001 and REQ-0003 consolidate into PO-0001. REQ-0002 (at 24h30m) opens PO-0002.
+    expect(consolidatedPOs.length).toBe(2);
+    expect(consolidatedPOs[0].po_id).toBe('PO-0001');
+    expect(consolidatedPOs[0].requirements.map((r) => r.group_id)).toEqual(['REQ-0001', 'REQ-0003']);
+    expect(consolidatedPOs[1].po_id).toBe('PO-0002');
+    expect(consolidatedPOs[1].requirements.map((r) => r.group_id)).toEqual(['REQ-0002']);
+  });
+
+  it('Duplicate pr_no and pr_line: first row is processed, only second row is marked NOT_PROCESSED', () => {
+    const duplicateBatch: PRLineInput[] = [
+      {
+        pr_no: 'PR-DUP-01',
+        pr_line: 1,
+        created_at: '2026-11-05 09:00',
+        requester: 'Alice',
+        department: 'Production',
+        plant: 'SYN-P1',
+        item_code: 'SYN-ITM-01',
+        description: 'Ball bearing 6308-ZZ',
+        quantity: 10,
+        uom: 'NOS',
+        estimated_unit_price: 1500,
+        need_by_date: '2026-11-20',
+        urgency: 'Normal',
+      },
+      {
+        pr_no: 'PR-OTHER-01',
+        pr_line: 1,
+        created_at: '2026-11-05 09:30',
+        requester: 'Bob',
+        department: 'Production',
+        plant: 'SYN-P1',
+        item_code: 'SYN-ITM-04',
+        description: 'Safety gloves',
+        quantity: 50,
+        uom: 'PAIR',
+        estimated_unit_price: 100,
+        need_by_date: '2026-11-22',
+        urgency: 'Normal',
+      },
+      {
+        pr_no: 'PR-DUP-01', // Exact duplicate of row 0
+        pr_line: 1,
+        created_at: '2026-11-05 10:00',
+        requester: 'Alice',
+        department: 'Production',
+        plant: 'SYN-P1',
+        item_code: 'SYN-ITM-01',
+        description: 'Ball bearing 6308-ZZ',
+        quantity: 10,
+        uom: 'NOS',
+        estimated_unit_price: 1500,
+        need_by_date: '2026-11-20',
+        urgency: 'Normal',
+      },
+    ];
+
+    const ctx: EngineContext = {
+      plants: SYNTHETIC_PLANTS,
+      items: SYNTHETIC_ITEMS,
+      suppliers: SYNTHETIC_SUPPLIERS,
+      po_history: SYNTHETIC_PO_HISTORY,
+      contracts: SYNTHETIC_CONTRACTS,
+      contract_lines: SYNTHETIC_CONTRACT_LINES,
+      policy_versions: [DEFAULT_POLICY_V5],
+    };
+
+    const res = runDecisionEngine(duplicateBatch, ctx);
+
+    // Row 0 should be PROCESSED and have a valid group_id & decision
+    expect(res.outputRows[0].pr_no).toBe('PR-DUP-01');
+    expect(res.outputRows[0].route).not.toBe('NOT_PROCESSED');
+    expect(res.outputRows[0].group_id).toBeTruthy();
+
+    // Row 1 should be PROCESSED
+    expect(res.outputRows[1].pr_no).toBe('PR-OTHER-01');
+    expect(res.outputRows[1].route).not.toBe('NOT_PROCESSED');
+
+    // Row 2 should be NOT_PROCESSED with duplicate error reason
+    expect(res.outputRows[2].pr_no).toBe('PR-DUP-01');
+    expect(res.outputRows[2].route).toBe('NOT_PROCESSED');
+    expect(res.outputRows[2].reason).toContain('Duplicate pr_no and pr_line');
+
+    expect(res.summary.totalInputLines).toBe(3);
+    expect(res.summary.processedLines).toBe(2);
+    expect(res.summary.notProcessedLines).toBe(1);
+  });
+
+  it('Rules 5.3 & 5.4 use recent_purchase_days and honour args.days for bought_from_active', () => {
+    // Synthetic item with a PO 400 days old from an active supplier
+    // Under 365-day window, bought_from_active should be FALSE -> RFQ instead of SPOT_PO
+    const oldPOBatch: PRLineInput[] = [
+      {
+        pr_no: 'PR-OLD-01',
+        pr_line: 1,
+        created_at: '2026-11-05 09:00',
+        requester: 'Charlie',
+        department: 'Production',
+        plant: 'SYN-P1',
+        item_code: 'SYN-ITM-OLD',
+        description: 'Special Sensor',
+        quantity: 1,
+        uom: 'NOS',
+        estimated_unit_price: 50000, // Below spot limit 200,000
+        need_by_date: '2026-11-20',
+        urgency: 'Normal',
+      },
+    ];
+
+    const oldPOHistory = [
+      {
+        po_number: 'PO-OLD-001',
+        po_line: 1,
+        po_date: '2025-09-01', // >400 days before 2026-11-05
+        supplier_id: 'SYN-SUP-101',
+        supplier_name: 'Synthetic Bearings Ltd',
+        plant: 'SYN-P1',
+        item_code: 'SYN-ITM-OLD',
+        description: 'Special Sensor',
+        quantity: 1,
+        unit_price: 50000,
+        currency: 'INR',
+        status: 'Closed',
+      },
+    ];
+
+    const ctx: EngineContext = {
+      plants: SYNTHETIC_PLANTS,
+      items: [
+        ...SYNTHETIC_ITEMS,
+        {
+          item_code: 'SYN-ITM-OLD',
+          description: 'Special Sensor',
+          category: 'Instrumentation',
+          item_type: 'Material',
+          uom: 'NOS',
+          standard_price: 50000,
+        },
+      ],
+      suppliers: SYNTHETIC_SUPPLIERS,
+      po_history: oldPOHistory,
+      contracts: [],
+      contract_lines: [],
+      policy_versions: [DEFAULT_POLICY_V5],
+    };
+
+    const res = runDecisionEngine(oldPOBatch, ctx);
+    // Since PO is 400 days old, bought_from_active_365 is FALSE -> cannot do SPOT_PO (Rule 5.4), routes to RFQ (Rule 5.5)
+    expect(res.outputRows[0].route).toBe('RFQ');
+  });
 });
