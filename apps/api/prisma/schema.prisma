@@ -152,6 +152,7 @@ model Requirement {
   clause           String?
   reason           String?
   po_id            String?
+  flags            String?  // JSON string array e.g. ["needs_capex_approval"]
   status           String   @default("pending") // pending, approved, overridden
   approved_by      String?
   approved_at      DateTime?
@@ -276,6 +277,7 @@ model Decision {
   supplier_id    String?
   contract_id    String?
   unit_price     Float?
+  flags          String?  // JSON string array
   trace_json     String?
   inputs_json    String?
   created_at     DateTime @default(now())
