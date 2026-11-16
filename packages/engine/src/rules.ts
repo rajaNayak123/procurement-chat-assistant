@@ -103,6 +103,7 @@ export function evaluateRequirementRules(
         decision: outcome.decision,
         route: outcome.route,
         supplier_id: supplierId,
+        contract_id: outcome.route === 'CONTRACT_PO' ? bestContract?.contract.contract_id : undefined,
         po_unit_price: poUnitPrice,
         suggested_supplier_ids: suggestedSuppliers,
         policy_version: policy.version,
