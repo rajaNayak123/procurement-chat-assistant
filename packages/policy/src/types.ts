@@ -138,6 +138,8 @@ export interface EvaluationContext {
     po_count_365: number;
     last_po_age_days: number | null;
     last_po_price: number | null;
+    bought_from_active_fn?: (days: number) => boolean;
+    po_count_fn?: (days: number) => number;
   };
   supplier?: {
     preferred_1?: {
