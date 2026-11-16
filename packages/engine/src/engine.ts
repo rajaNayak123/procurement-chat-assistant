@@ -230,6 +230,7 @@ export function runDecisionEngine(
       item
     );
     req.decision = decision;
+    req.contract_id = decision.contract_id;
 
     // If decision takes CONTRACT_PO, record simulated ceiling consumption
     if (decision.decision === 'PO' && decision.route === 'CONTRACT_PO' && bestUsableContract) {
