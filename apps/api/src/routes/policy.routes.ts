@@ -2,6 +2,8 @@ import { Router, Request, Response } from 'express';
 import multer from 'multer';
 import pdfParse from 'pdf-parse';
 import mammoth from 'mammoth';
+import fs from 'fs';
+import path from 'path';
 import { prisma } from '../prisma.js';
 import {
   getActivePolicy,
@@ -20,6 +22,14 @@ import { logAuditEvent } from '../services/audit.service.js';
 
 const upload = multer({ limits: { fileSize: 10 * 1024 * 1024 } });
 export const policyRouter = Router();
+
+function getRetroactiveWarning(effectiveFrom: string): string | null {
+  const todayStr = new Date().toISOString().slice(0, 10);
+  if (effectiveFrom < todayStr) {
+    return `Effective date ${effectiveFrom} is retroactive (earlier than today ${todayStr}). Reprocessing batch will re-evaluate requirements under this retroactive version.`;
+  }
+  return null;
+}
 
 // GET /api/policy/versions
 policyRouter.get('/policy/versions', async (_req: Request, res: Response) => {
@@ -78,13 +88,31 @@ policyRouter.post(
       const basePolicy = await getActivePolicy();
       const changeSet = await parsePolicyAmendment(text, basePolicy);
 
+      // Persist uploaded policy file to disk and record in policyDocument table
+      const uploadsDir = path.resolve(process.cwd(), 'uploads/policies');
+      if (!fs.existsSync(uploadsDir)) {
+        fs.mkdirSync(uploadsDir, { recursive: true });
+      }
+      const safeFileName = `${Date.now()}_${req.file.originalname}`;
+      const savedPath = path.join(uploadsDir, safeFileName);
+      fs.writeFileSync(savedPath, req.file.buffer);
+
+      const policyDoc = await prisma.policyDocument.create({
+        data: {
+          file_name: req.file.originalname,
+          file_path: savedPath,
+          version: changeSet.target_version,
+        },
+      });
+
       // Apply to copy to get candidate policy
       const candidatePolicy = applyChangeSet(basePolicy, changeSet);
       const diff = diffPolicies(basePolicy, candidatePolicy);
       const lintIssues = lintPolicy(candidatePolicy);
       const impactPreview = await computeImpactPreview(basePolicy, candidatePolicy);
+      const retroactiveWarning = getRetroactiveWarning(changeSet.effective_from);
 
-      // Save change set to database
+      // Save change set to database with status 'pending_approval'
       const saved = await prisma.policyChangeSet.create({
         data: {
           policy_id: changeSet.policy_id,
@@ -95,7 +123,7 @@ policyRouter.post(
           operations: JSON.stringify(changeSet.operations),
           citations: JSON.stringify(changeSet.citations),
           assumptions: JSON.stringify(changeSet.assumptions),
-          status: 'pending',
+          status: 'pending_approval',
         },
       });
 
@@ -106,6 +134,12 @@ policyRouter.post(
         lintIssues,
         impactPreview,
         candidatePolicy,
+        retroactive_warning: retroactiveWarning,
+        document: {
+          id: policyDoc.id,
+          file_name: policyDoc.file_name,
+          file_path: policyDoc.file_path,
+        },
       });
     } catch (err: any) {
       console.error('Error parsing amendment document:', err);
@@ -136,6 +170,7 @@ policyRouter.post('/policy/changes/chat', async (req: Request, res: Response) =>
     const diff = diffPolicies(basePolicy, candidatePolicy);
     const lintIssues = lintPolicy(candidatePolicy);
     const impactPreview = await computeImpactPreview(basePolicy, candidatePolicy);
+    const retroactiveWarning = getRetroactiveWarning(changeSet.effective_from);
 
     const saved = await prisma.policyChangeSet.create({
       data: {
@@ -147,7 +182,7 @@ policyRouter.post('/policy/changes/chat', async (req: Request, res: Response) =>
         operations: JSON.stringify(changeSet.operations),
         citations: JSON.stringify(changeSet.citations),
         assumptions: JSON.stringify(changeSet.assumptions),
-        status: 'pending',
+        status: 'pending_approval',
       },
     });
 
@@ -158,6 +193,7 @@ policyRouter.post('/policy/changes/chat', async (req: Request, res: Response) =>
       lintIssues,
       impactPreview,
       candidatePolicy,
+      retroactive_warning: retroactiveWarning,
     });
   } catch (err: any) {
     console.error('Error parsing chat change:', err);
@@ -203,6 +239,7 @@ policyRouter.post('/policy/changes/form', async (req: Request, res: Response) =>
     const diff = diffPolicies(basePolicy, candidatePolicy);
     const lintIssues = lintPolicy(candidatePolicy);
     const impactPreview = await computeImpactPreview(basePolicy, candidatePolicy);
+    const retroactiveWarning = getRetroactiveWarning(changeSet.effective_from);
 
     const saved = await prisma.policyChangeSet.create({
       data: {
@@ -214,7 +251,7 @@ policyRouter.post('/policy/changes/form', async (req: Request, res: Response) =>
         operations: JSON.stringify(changeSet.operations),
         citations: JSON.stringify(changeSet.citations),
         assumptions: JSON.stringify(changeSet.assumptions),
-        status: 'pending',
+        status: 'pending_approval',
       },
     });
 
@@ -225,6 +262,7 @@ policyRouter.post('/policy/changes/form', async (req: Request, res: Response) =>
       lintIssues,
       impactPreview,
       candidatePolicy,
+      retroactive_warning: retroactiveWarning,
     });
   } catch (err: any) {
     console.error('Error applying structured form change:', err);
@@ -258,6 +296,7 @@ policyRouter.get('/policy/changes/:id', async (req: Request, res: Response) => {
   const diff = diffPolicies(basePolicy, candidatePolicy);
   const lintIssues = lintPolicy(candidatePolicy);
   const impactPreview = await computeImpactPreview(basePolicy, candidatePolicy);
+  const retroactiveWarning = getRetroactiveWarning(changeSet.effective_from);
 
   return res.json({
     changeSet,
@@ -265,6 +304,7 @@ policyRouter.get('/policy/changes/:id', async (req: Request, res: Response) => {
     lintIssues,
     impactPreview,
     candidatePolicy,
+    retroactive_warning: retroactiveWarning,
     status: changeSetDb.status,
   });
 });
@@ -285,21 +325,74 @@ policyRouter.post('/policy/changes/:id/approve', async (req: Request, res: Respo
     effective_from,
     version,
     comment = '',
+    confirmed_assumptions = [],
+    all_assumptions_confirmed = false,
   } = req.body;
+
+  const targetVersion = (version || changeSetDb.target_version).trim();
+
+  // 1. Unique constraint guardrail: prevent duplicate version string crash
+  const existingVersion = await prisma.policyVersion.findUnique({
+    where: { version: targetVersion },
+  });
+  if (existingVersion) {
+    return res.status(400).json({
+      error: `Version '${targetVersion}' already exists. Please choose a new unique version label (e.g. v5.2).`,
+    });
+  }
+
+  // 2. Unticked assumptions guardrail: all assumptions must be confirmed
+  const assumptions: string[] = JSON.parse(changeSetDb.assumptions || '[]');
+  if (assumptions.length > 0) {
+    const unconfirmed = assumptions.filter((a) => !confirmed_assumptions.includes(a));
+    if (!all_assumptions_confirmed && unconfirmed.length > 0) {
+      return res.status(400).json({
+        error: `Unticked assumptions: all ${assumptions.length} assumptions must be acknowledged and confirmed before approval.`,
+        unconfirmed_assumptions: unconfirmed,
+      });
+    }
+  }
 
   const basePolicy = await getActivePolicy();
   const changeSet: PolicyChangeSet = {
     policy_id: changeSetDb.policy_id,
     base_version: changeSetDb.base_version,
-    target_version: version || changeSetDb.target_version,
+    target_version: targetVersion,
     effective_from: effective_from || changeSetDb.effective_from,
     is_amendment: changeSetDb.is_amendment,
     operations: JSON.parse(changeSetDb.operations),
     citations: JSON.parse(changeSetDb.citations),
-    assumptions: JSON.parse(changeSetDb.assumptions),
+    assumptions,
   };
 
   const approvedPolicy = applyChangeSet(basePolicy, changeSet);
+
+  // 3. Lint errors guardrail: errors block approval
+  const lintIssues = lintPolicy(approvedPolicy);
+  const lintErrors = lintIssues.filter((i) => i.severity === 'error');
+  if (lintErrors.length > 0) {
+    return res.status(400).json({
+      error: 'Approval blocked: candidate policy has lint errors that must be resolved first.',
+      lintErrors,
+      lintIssues,
+    });
+  }
+
+  // 4. Status lifecycle: scheduled vs active vs superseded
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const isFuture = approvedPolicy.effective_from > todayStr;
+  const versionStatus = isFuture ? 'scheduled' : 'active';
+
+  if (versionStatus === 'active') {
+    // Supersede previously active versions with effective_from <= this one
+    await prisma.policyVersion.updateMany({
+      where: {
+        status: 'active',
+        effective_from: { lte: approvedPolicy.effective_from },
+      },
+      data: { status: 'superseded' },
+    });
+  }
 
   // Save new policy version in database
   await prisma.policyVersion.create({
@@ -307,7 +400,7 @@ policyRouter.post('/policy/changes/:id/approve', async (req: Request, res: Respo
       policy_id: approvedPolicy.policy_id,
       version: approvedPolicy.version,
       effective_from: approvedPolicy.effective_from,
-      status: 'active',
+      status: versionStatus,
       policy_json: JSON.stringify(approvedPolicy, null, 2),
       approved_by: actor,
       approved_at: new Date(),
@@ -324,15 +417,21 @@ policyRouter.post('/policy/changes/:id/approve', async (req: Request, res: Respo
   await logAuditEvent(
     'PolicyVersion',
     approvedPolicy.version,
-    'approve_and_activate',
+    isFuture ? 'approve_and_schedule' : 'approve_and_activate',
     actor,
     role,
-    { target_version: approvedPolicy.version, effective_from: approvedPolicy.effective_from, comment }
+    { target_version: approvedPolicy.version, effective_from: approvedPolicy.effective_from, status: versionStatus, comment }
   );
 
+  const retroactiveWarning = getRetroactiveWarning(approvedPolicy.effective_from);
+
   return res.json({
-    message: `Policy v${approvedPolicy.version} approved and activated successfully`,
+    message: isFuture
+      ? `Policy v${approvedPolicy.version} approved and scheduled for activation on ${approvedPolicy.effective_from}`
+      : `Policy v${approvedPolicy.version} approved and activated successfully`,
     policy: approvedPolicy,
+    status: versionStatus,
+    retroactive_warning: retroactiveWarning,
   });
 });
 
