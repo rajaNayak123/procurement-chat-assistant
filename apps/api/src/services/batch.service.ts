@@ -271,6 +271,7 @@ export async function processBatch(
           clause: req.decision?.clause,
           reason: req.decision?.reason,
           po_id: req.decision?.po_id || null,
+          flags: JSON.stringify(req.decision?.flags || req.flags || []),
           rule_trace: JSON.stringify(req.decision?.rule_trace),
           status: 'pending',
         },
@@ -285,6 +286,7 @@ export async function processBatch(
           clause: req.decision?.clause,
           reason: req.decision?.reason,
           po_id: req.decision?.po_id || null,
+          flags: JSON.stringify(req.decision?.flags || req.flags || []),
           rule_trace: JSON.stringify(req.decision?.rule_trace),
         },
       });
