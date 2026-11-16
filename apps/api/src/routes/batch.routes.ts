@@ -88,63 +88,106 @@ batchRouter.post('/batches/:id/reprocess', async (req: Request, res: Response) =
   });
   if (!batch) return res.status(404).json({ error: 'Batch not found' });
 
+  // Query all PR lines ordered strictly by original input_index ASC
   const lines = await prisma.pRLine.findMany({
     where: { batch_id: req.params.id },
+    orderBy: { input_index: 'asc' },
   });
 
-  const rawLines = lines.map((l) => ({
-    pr_no: l.pr_no,
-    pr_line: l.pr_line,
-    created_at: l.created_at.toISOString(),
-    requester: l.requester,
-    department: l.department,
-    plant: l.plant,
-    item_code: l.resolved_item_code,
-    description: l.description,
-    quantity: l.quantity,
-    uom: l.uom,
-    estimated_unit_price: l.estimated_unit_price,
-    need_by_date: l.need_by_date,
-    urgency: l.urgency,
-  }));
+  if (lines.length === 0) {
+    return res.status(400).json({ error: 'No lines found for this batch' });
+  }
+
+  // Reconstruct exact original raw input lines (preserving raw created_at and input_item_code)
+  const rawLines = lines.map((l) => {
+    if (l.raw_json) {
+      try {
+        return JSON.parse(l.raw_json);
+      } catch {}
+    }
+    return {
+      pr_no: l.pr_no,
+      pr_line: l.pr_line,
+      created_at: l.raw_created_at || l.created_at.toISOString(),
+      requester: l.requester,
+      department: l.department,
+      plant: l.plant,
+      item_code: l.input_item_code || undefined, // CRITICAL: NEVER pass resolved_item_code!
+      description: l.description,
+      quantity: l.quantity,
+      uom: l.uom,
+      estimated_unit_price: l.estimated_unit_price,
+      need_by_date: l.need_by_date,
+      urgency: l.urgency,
+    };
+  });
 
   const policyVersion = req.body.policy_version || (req.query.policy_version as string | undefined);
+  const asOfPolicy = req.body.as_of_policy || (req.query.as_of_policy as string | undefined);
+
   const result = await processBatch(rawLines, {
     fileName: batch.file_name,
     persist: true,
+    batchId: batch.id,
     policy_version: policyVersion,
+    as_of_policy: asOfPolicy,
   });
 
   return res.json({
     message: 'Batch reprocessed successfully',
     summary: result.summary,
     outputRows: result.outputRows,
+    batchId: batch.id,
+    runId: result.runId,
   });
 });
 
 // GET /api/batches/:id/export.csv
 batchRouter.get('/batches/:id/export.csv', async (req: Request, res: Response) => {
+  const batch = await prisma.pRBatch.findUnique({
+    where: { id: req.params.id },
+  });
+  if (!batch) return res.status(404).json({ error: 'Batch not found' });
+
+  // Query all PR lines ordered strictly by original input_index ASC
   const lines = await prisma.pRLine.findMany({
     where: { batch_id: req.params.id },
+    orderBy: { input_index: 'asc' },
   });
 
-  const rawLines = lines.map((l) => ({
-    pr_no: l.pr_no,
-    pr_line: l.pr_line,
-    created_at: l.created_at.toISOString(),
-    requester: l.requester,
-    department: l.department,
-    plant: l.plant,
-    item_code: l.resolved_item_code,
-    description: l.description,
-    quantity: l.quantity,
-    uom: l.uom,
-    estimated_unit_price: l.estimated_unit_price,
-    need_by_date: l.need_by_date,
-    urgency: l.urgency,
-  }));
+  const rawLines = lines.map((l) => {
+    if (l.raw_json) {
+      try {
+        return JSON.parse(l.raw_json);
+      } catch {}
+    }
+    return {
+      pr_no: l.pr_no,
+      pr_line: l.pr_line,
+      created_at: l.raw_created_at || l.created_at.toISOString(),
+      requester: l.requester,
+      department: l.department,
+      plant: l.plant,
+      item_code: l.input_item_code || undefined, // CRITICAL: NEVER pass resolved_item_code!
+      description: l.description,
+      quantity: l.quantity,
+      uom: l.uom,
+      estimated_unit_price: l.estimated_unit_price,
+      need_by_date: l.need_by_date,
+      urgency: l.urgency,
+    };
+  });
 
-  const result = await processBatch(rawLines, { persist: false });
+  // Use the latest decision run's policy version for this batch if present
+  const latestRun = await prisma.decisionRun.findFirst({
+    where: { batch_id: req.params.id },
+    orderBy: { created_at: 'desc' },
+  });
+
+  const result = await processBatch(rawLines, {
+    persist: false,
+    policy_version: latestRun?.policy_version,
+  });
   const csvStr = generateDecisionsCSV(result.outputRows);
 
   res.setHeader('Content-Type', 'text/csv');
