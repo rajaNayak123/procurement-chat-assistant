@@ -1,9 +1,12 @@
 import { Requirement, ConsolidatedPO } from './types.js';
 import { getHoursDiff, parseDateFlexible } from './utils/dates.js';
+import { PolicyDocument } from '@cantill/policy';
+import { selectPolicyVersionForDate } from './utils/policySelector.js';
 
 export function consolidatePOs(
   requirements: Requirement[],
-  consolidationWindowHours: number = 24
+  windowHoursOrPolicies: number | PolicyDocument[] = 24,
+  forcedVersion?: string
 ): { consolidatedPOs: ConsolidatedPO[]; updatedRequirements: Requirement[] } {
   const updatedRequirements = [...requirements];
   const pos: ConsolidatedPO[] = [];
@@ -34,6 +37,19 @@ export function consolidatePOs(
       if (po.supplier_id !== supplierId) continue;
       if (po.plant !== plant) continue;
       if (po.route !== route) continue; // Route must match (e.g. Spot vs Emergency do not merge)
+
+      // Window is determined by anchor requirement's policy version
+      let consolidationWindowHours = 24;
+      if (Array.isArray(windowHoursOrPolicies)) {
+        const anchorPolicy = selectPolicyVersionForDate(
+          po.requirements[0].requirement_date,
+          windowHoursOrPolicies,
+          forcedVersion
+        );
+        consolidationWindowHours = anchorPolicy.params.consolidation_window_hours ?? 24;
+      } else {
+        consolidationWindowHours = windowHoursOrPolicies;
+      }
 
       // Measure from anchor requirement's created_at (not a sliding window)
       const diffHours = getHoursDiff(reqCreatedAt, po.anchor_created_at);
