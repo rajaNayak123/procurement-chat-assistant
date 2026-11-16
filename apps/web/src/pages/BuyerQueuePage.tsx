@@ -211,7 +211,7 @@ export const BuyerQueuePage: React.FC<BuyerQueuePageProps> = ({ onSelectRequirem
                 filteredRequirements.map((req) => (
                   <tr key={req.id} className="hover:bg-slate-50/80 transition-colors">
                     <td className="px-4 py-3 font-mono font-bold text-sky-700">
-                      {req.id}
+                      {req.group_id || req.id}
                     </td>
                     <td className="px-4 py-3 font-medium text-slate-700">{req.plant}</td>
                     <td className="px-4 py-3 font-mono text-slate-900">{req.item_code}</td>

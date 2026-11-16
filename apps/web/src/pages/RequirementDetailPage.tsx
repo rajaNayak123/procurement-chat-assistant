@@ -163,7 +163,7 @@ export const RequirementDetailPage: React.FC<RequirementDetailPageProps> = ({
         <div className="bg-slate-50 border-b border-slate-200 p-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
             <div className="flex items-center space-x-3 mb-1">
-              <span className="font-mono text-sm font-bold text-sky-800">{requirement.id}</span>
+              <span className="font-mono text-sm font-bold text-sky-800">{requirement.group_id || requirement.id}</span>
               <span
                 className={`px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider ${
                   requirement.route === 'CONTRACT_PO'
