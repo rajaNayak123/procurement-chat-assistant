@@ -187,4 +187,42 @@ PR-T3,1,2026-11-04 10:45,Charlie,Safety,CHK1,ITM-1016,VCI Bag,200,NOS,22,2026-11
     expect(exportLines[2]).toContain('NOT_PROCESSED');
     expect(exportLines[2]).toContain('PR-T2');
   });
+
+  it('POST /api/policy/changes/form creates structured change set and previews impact', async () => {
+    const res = await request(app)
+      .post('/api/policy/changes/form')
+      .send({
+        target_version: '5.2',
+        effective_from: '2026-11-25',
+        operations: [
+          {
+            op: 'set_param',
+            param: 'spot_limit',
+            value: 300000,
+            citation: 'Form: Raised spot limit to 3 lakh',
+          },
+          {
+            op: 'disable_rule',
+            rule_id: '5.3',
+            citation: 'Form: Withdrew emergency rule',
+          },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.changeSet.operations.length).toBe(2);
+    expect(res.body.candidatePolicy.params.spot_limit).toBe(300000);
+    expect(res.body.diff.summaryLines.length).toBeGreaterThan(0);
+    expect(res.body.change_set_id).toBeDefined();
+  });
+
+  it('POST /api/policy/changes/chat returns 400 and needs_form_editor when 0 operations match', async () => {
+    const res = await request(app)
+      .post('/api/policy/changes/chat')
+      .send({ text: 'Hello, this sentence has no policy operations whatsoever.' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.needs_form_editor).toBe(true);
+    expect(res.body.error).toContain('form editor');
+  });
 });
