@@ -101,9 +101,12 @@ model PRBatch {
 model PRLine {
   id                   String   @id @default(uuid())
   batch_id             String?
+  input_index          Int      @default(0)
   pr_no                String
   pr_line              Int
   created_at           DateTime @default(now())
+  raw_created_at       String?
+  raw_json             String?
   requester            String
   department           String
   plant                String
@@ -118,12 +121,16 @@ model PRLine {
   match_method         String
   match_confidence     Float
   flags                String   // JSON string array
-  status               String   @default("open") // open, grouped, approved
+  status               String   @default("open") // open, grouped, approved, not_processed
   requirement_id       String?
+  error_reason         String?
 }
 
 model Requirement {
-  id               String   @id // REQ-0001...
+  id               String   @id // Scoped to decision run: ${run_id}_${group_id} or REQ-0001
+  run_id           String?  // Associated DecisionRun id
+  batch_id         String?  // Associated PRBatch id
+  group_id         String?  // REQ-0001... display ID
   item_code        String
   plant            String
   requirement_date String
@@ -152,7 +159,10 @@ model Requirement {
 }
 
 model PurchaseOrder {
-  id          String   @id // PO-0001...
+  id          String   @id // Scoped to decision run: ${run_id}_${po_id} or PO-0001
+  run_id      String?  // Associated DecisionRun id
+  batch_id    String?  // Associated PRBatch id
+  po_id       String?  // PO-0001... display ID
   supplier_id String
   plant       String
   route       String
