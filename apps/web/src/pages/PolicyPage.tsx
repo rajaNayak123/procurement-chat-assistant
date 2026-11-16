@@ -6,6 +6,7 @@ import {
   UploadCloud,
   CheckCircle2,
   AlertTriangle,
+  AlertCircle,
   FileCode,
   Sparkles,
   ArrowRight,
@@ -207,6 +208,22 @@ export const PolicyPage: React.FC = () => {
 
   const handleApproveAndActivate = async () => {
     if (!extractedReview) return;
+
+    // Check assumptions
+    const assumptions = extractedReview.changeSet?.assumptions || [];
+    const confirmedAssumptions = assumptions.filter((_: string, idx: number) => acknowledgedAssumptions[idx]);
+    if (assumptions.length > 0 && confirmedAssumptions.length < assumptions.length) {
+      alert(`Approval blocked: Please review and check all ${assumptions.length} assumptions before approval.`);
+      return;
+    }
+
+    // Check lint errors
+    const hasLintErrors = extractedReview.lintIssues?.some((i: any) => i.severity === 'error');
+    if (hasLintErrors) {
+      alert('Approval blocked: Candidate policy contains lint errors that must be resolved first.');
+      return;
+    }
+
     setApprovalLoading(true);
 
     try {
@@ -216,6 +233,7 @@ export const PolicyPage: React.FC = () => {
         version: targetVersion,
         effective_from: effectiveDate,
         comment: approvalComment || 'Approved by Procurement Head',
+        confirmed_assumptions: confirmedAssumptions,
       });
 
       setSuccessMessage(res.message);
@@ -574,6 +592,39 @@ export const PolicyPage: React.FC = () => {
               Verify textual diff, exact source sentence citations, and impact on current requirements before activating.
             </p>
           </div>
+
+          {/* Retroactive Date Warning */}
+          {extractedReview.retroactive_warning && (
+            <div className="p-3 bg-amber-50 border border-amber-300 rounded-lg text-xs text-amber-900 flex items-center space-x-2">
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+              <span className="font-semibold">{extractedReview.retroactive_warning}</span>
+            </div>
+          )}
+
+          {/* Lint Issues Banner */}
+          {extractedReview.lintIssues && extractedReview.lintIssues.length > 0 && (
+            <div className="space-y-2">
+              <span className="text-xs font-bold uppercase tracking-wider text-slate-700 block">Lint Analysis</span>
+              <div className="space-y-1.5">
+                {extractedReview.lintIssues.map((issue: any, i: number) => (
+                  <div
+                    key={i}
+                    className={`p-2.5 rounded-lg text-xs flex items-start space-x-2 border ${
+                      issue.severity === 'error'
+                        ? 'bg-rose-50 border-rose-300 text-rose-900 font-medium'
+                        : 'bg-amber-50 border-amber-200 text-amber-900'
+                    }`}
+                  >
+                    <AlertCircle className={`w-4 h-4 shrink-0 mt-0.5 ${issue.severity === 'error' ? 'text-rose-600' : 'text-amber-600'}`} />
+                    <div>
+                      <span className="font-bold uppercase text-[10px] mr-1.5">[{issue.severity}]:</span>
+                      <span>{issue.message}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Plain-Language Diff */}
           <div className="space-y-2">
