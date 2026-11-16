@@ -237,6 +237,20 @@ export const BuyerQueuePage: React.FC<BuyerQueuePageProps> = ({ onSelectRequirem
                       >
                         {req.route}
                       </span>
+                      {req.flags && (
+                        <div className="flex flex-wrap gap-1 mt-1">
+                          {(typeof req.flags === 'string' ? JSON.parse(req.flags) : req.flags).map(
+                            (f: string, i: number) => (
+                              <span
+                                key={i}
+                                className="px-1.5 py-0.5 rounded text-[9px] bg-purple-50 text-purple-700 font-mono border border-purple-200"
+                              >
+                                {f}
+                              </span>
+                            )
+                          )}
+                        </div>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-slate-600 truncate max-w-[200px]">
                       {req.supplier_id ? (
