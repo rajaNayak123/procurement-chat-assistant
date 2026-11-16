@@ -119,6 +119,7 @@ export interface Requirement {
   valuation_price: number;
   valuation_source: 'contract' | 'po_history' | 'standard_price' | 'requester_estimate' | 'missing';
   valuation_ref?: string; // contract id or po number relied upon
+  contract_id?: string;
   group_value_inr: number; // total_quantity * valuation_price
   decision?: RequirementDecision;
 }
@@ -135,6 +136,7 @@ export interface RequirementDecision {
     | 'NEW_ITEM_SOURCING'
     | string;
   supplier_id?: string;
+  contract_id?: string;
   po_unit_price?: number;
   suggested_supplier_ids: string[];
   policy_version: string;
