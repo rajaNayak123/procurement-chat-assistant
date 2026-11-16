@@ -23,8 +23,9 @@ function getCacheKey(text: string, baseVersion: string): string {
 }
 
 export async function getActivePolicy(asOfDate?: string): Promise<PolicyDocument> {
+  const targetDate = asOfDate || new Date().toISOString().slice(0, 10);
   const versions = await prisma.policyVersion.findMany({
-    where: { status: { in: ['active', 'approved'] } },
+    where: { status: { in: ['active', 'approved', 'superseded', 'scheduled'] } },
     orderBy: { effective_from: 'desc' },
   });
 
@@ -32,19 +33,18 @@ export async function getActivePolicy(asOfDate?: string): Promise<PolicyDocument
     return DEFAULT_POLICY_V5;
   }
 
-  if (asOfDate) {
-    const matched = versions.find((v) => v.effective_from <= asOfDate);
-    if (matched) {
-      try {
-        return JSON.parse(matched.policy_json);
-      } catch {
-        return DEFAULT_POLICY_V5;
-      }
+  const matched = versions.find((v) => v.effective_from <= targetDate);
+  if (matched) {
+    try {
+      return JSON.parse(matched.policy_json);
+    } catch {
+      return DEFAULT_POLICY_V5;
     }
   }
 
   try {
-    return JSON.parse(versions[0].policy_json);
+    // If no version before target date, use the earliest available version
+    return JSON.parse(versions[versions.length - 1].policy_json);
   } catch {
     return DEFAULT_POLICY_V5;
   }
