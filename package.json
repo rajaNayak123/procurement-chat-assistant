@@ -1,0 +1,28 @@
+{
+  "name": "procurement-chat-assistant",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Corvo Engineering Policy-Driven PR-to-PO Web Application",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:engine": "vitest run packages/engine",
+    "test:policy": "vitest run packages/policy",
+    "test:api": "vitest run apps/api",
+    "lint": "eslint . --ext .ts,.tsx",
+    "dev": "concurrently \"npm run dev --workspace=@cantill/api\" \"npm run dev --workspace=@cantill/web\"",
+    "check-data": "./scripts/check-no-task-data.sh",
+    "seed": "npm run seed --workspace=@cantill/api"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "concurrently": "^9.1.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.8"
+  }
+}
