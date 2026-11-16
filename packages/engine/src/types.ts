@@ -73,6 +73,7 @@ export interface PRLineInput {
 }
 
 export interface ResolvedPRLine {
+  input_index?: number;
   pr_no: string;
   pr_line: number;
   created_at: string;
@@ -96,6 +97,7 @@ export interface ResolvedPRLine {
 }
 
 export interface NotProcessedRow {
+  input_index?: number;
   pr_no: string;
   pr_line: string | number;
   reason: string;
