@@ -86,12 +86,19 @@ export const RequirementDetailPage: React.FC<RequirementDetailPageProps> = ({
   const { requirement, lines, preferred_suppliers, candidate_contracts, overrides } = data;
   const isApproved = requirement.status === 'approved';
 
+  let flagsList: string[] = [];
+  try {
+    if (requirement.flags) {
+      flagsList = typeof requirement.flags === 'string' ? JSON.parse(requirement.flags) : requirement.flags;
+    }
+  } catch {}
+
   // Primary action button label dynamically adapts (Section 8 Table)
   let approveLabel = 'Approve';
-  if (requirement.route?.includes('PO')) {
-    approveLabel = requirement.po_id ? `Create PO (${requirement.po_id})` : 'Create PO';
-  } else if (requirement.route === 'CAPEX_SOURCING') {
+  if (flagsList.includes('needs_capex_approval') || requirement.route === 'CAPEX_SOURCING') {
     approveLabel = user.role === 'Procurement Head' ? 'Approve capex' : 'Send for capex approval';
+  } else if (requirement.route?.includes('PO')) {
+    approveLabel = requirement.po_id ? `Create PO (${requirement.po_id})` : 'Create PO';
   } else if (requirement.route === 'RFQ') {
     approveLabel = 'Create RFQ';
   } else if (requirement.route === 'RFP') {
@@ -179,6 +186,14 @@ export const RequirementDetailPage: React.FC<RequirementDetailPageProps> = ({
               >
                 {requirement.route}
               </span>
+              {flagsList.map((f: string, i: number) => (
+                <span
+                  key={i}
+                  className="px-2.5 py-0.5 rounded-full text-[11px] font-bold uppercase tracking-wider bg-purple-100 text-purple-800 border border-purple-300"
+                >
+                  {f.replace(/_/g, ' ')}
+                </span>
+              ))}
               <span
                 className={`px-2 py-0.5 rounded text-[11px] font-semibold uppercase ${
                   requirement.status === 'approved'
@@ -328,7 +343,19 @@ export const RequirementDetailPage: React.FC<RequirementDetailPageProps> = ({
                         {t.matched ? 'MATCHED' : 'DID NOT MATCH'}
                       </span>
                     </td>
-                    <td className="px-3 py-2 text-slate-600">{t.reason}</td>
+                    <td className="px-3 py-2 text-slate-600">
+                      <div>{t.reason}</div>
+                      {!t.matched && t.failing_field && (
+                        <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] font-mono text-slate-500">
+                          <span className="px-1.5 py-0.5 bg-rose-50 text-rose-700 rounded border border-rose-200">
+                            field: {t.failing_field}
+                          </span>
+                          <span>actual: {JSON.stringify(t.actual_value)}</span>
+                          <span className="font-bold text-slate-700">{t.operator}</span>
+                          <span>expected: {JSON.stringify(t.expected_value)}</span>
+                        </div>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
