@@ -7,11 +7,15 @@ export async function apiRequest<T = any>(
   const res = await fetch(`${BASE_URL}${path}`, options);
   if (!res.ok) {
     let errMessage = `Request failed: ${res.status} ${res.statusText}`;
+    let needsFormEditor = false;
     try {
       const errJson = await res.json();
       if (errJson.error) errMessage = errJson.error;
+      if (errJson.needs_form_editor) needsFormEditor = true;
     } catch {}
-    throw new Error(errMessage);
+    const err: any = new Error(errMessage);
+    err.needs_form_editor = needsFormEditor;
+    throw err;
   }
   return res.json();
 }
@@ -77,6 +81,17 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text }),
+    }),
+  submitFormPolicyChange: (payload: {
+    target_version?: string;
+    effective_from?: string;
+    operations: any[];
+    assumptions?: string[];
+  }) =>
+    apiRequest('/policy/changes/form', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
     }),
   getPolicyChange: (id: string) => apiRequest(`/policy/changes/${id}`),
   approvePolicyChange: (
